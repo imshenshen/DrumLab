@@ -556,6 +556,19 @@ const CHUNK_AHEAD = 2;    // chunks scheduled ahead of the playhead
 const CHUNK_BEHIND = 1;   // chunks kept cached behind it
 const SCHED_TICK_MS = 120;
 
+// Fire the synth this many wall-seconds EARLY so its audible attack lands on the beat.
+// MEASURED (Tone.Offline render of the real voices): every voice fires within ~1 ms of
+// its trigger, amplitude-peaking ~3-5 ms later (kick/snare/hihat/tom); the ride cymbal is
+// a slow swell (~15 ms) by design. So the true attack is only a few ms -- this lead is
+// small on purpose. It is wall-fixed (never scaled by speed) so the feel holds at every
+// rate, and kept OUT of the picked onset times (app.py ONSET_COMP_SEC), which mark the
+// true transient for the markers + MIDI export. With ONSET_COMP_SEC=0 there is no
+// content-time term at all, so there is no speed-dependent drift.
+// (A large lead here -- 0.07-0.09 was tried -- flams the synth well ahead of the real
+// drum stem: it was built on a wrong "kick attack is ~70 ms" assumption, since disproved.)
+// TWEAK ME by ear: raise if the synth trails the track, lower if it anticipates.
+const SYNTH_LEAD_SEC = 0.09;
+
 function makeChunkScheduler(laneName, chunkQuery) {
   const dest = laneGains[laneName];
   const extraQ = chunkQuery || "";
@@ -1184,7 +1197,11 @@ function rebuildPart(events) {
   for (const cls in events) for (const t of events[cls]) flat.push({ time: t / engine.speed, cls: cls });
   flat.sort((a, b) => a.time - b.time);
   if (!flat.length) return;
-  engine.part = new Tone.Part((time, ev) => engine.synths.trigger(ev.cls, time), flat).start(0);
+  // Fire the synth a wall-fixed lead early so its audible attack lands on the beat at
+  // every speed (see SYNTH_LEAD_SEC). The Part callback runs ~lookAhead (0.1 s) before
+  // `time`, so subtracting the lead still schedules in the future; trigger() try/catches
+  // the rare start-of-track note whose lead would fall before now.
+  engine.part = new Tone.Part((time, ev) => engine.synths.trigger(ev.cls, time - SYNTH_LEAD_SEC), flat).start(0);
 }
 
 async function fetchEvents() {

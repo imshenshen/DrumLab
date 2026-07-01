@@ -33,7 +33,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-APP_VERSION = "5.2"
+APP_VERSION = "5.3"
 APP_DIR = Path(__file__).resolve().parent
 WORK = APP_DIR / "workdir"
 UPLOADS = WORK / "uploads"
@@ -56,13 +56,17 @@ CH_NAMES = ["kick", "snare", "tom", "hihat", "cymbal"]
 DEFAULT_THRESHOLDS = {"kick": 0.22, "snare": 0.24, "tom": 0.32, "hihat": 0.22, "cymbal": 0.30}
 # Audio extensions the library scanner and the upload picker both accept.
 AUDIO_EXTS = {".wav", ".mp3", ".flac", ".m4a", ".ogg", ".aac", ".aiff", ".opus"}
-# Onset-latency compensation: the model's activation peaks a few frames AFTER the
-# real transient (spectrogram framing is center=True, so i/fps is otherwise exact),
-# so every picked hit lands late against the audio. Shift all onsets earlier by this
-# many seconds. Applied once in do_pick(), so it flows to the roll, the synth, and the
-# MIDI/MusicXML exports alike. TWEAK ME by ear: raise if the synth still trails the
-# track, lower if it now anticipates; a re-pick (instant) applies the new value.
-ONSET_COMP_SEC = 0.08
+# Onset-latency compensation: cancel ONLY the model's own activation latency so a
+# picked onset marks the TRUE audio transient. Measured against real drum onsets the
+# activation peak trails the transient by ~9 ms (spectrogram framing is center=True,
+# so i/fps is otherwise exact), so this is small. Applied once in do_pick(), it flows
+# to the roll markers and the MIDI/MusicXML exports, which must line up with the actual
+# hits (not be pre-shifted). The SYNTH's playback feel is a SEPARATE concern: its voices
+# have an audible attack fixed in WALL time, so it is led there, not here -- see
+# SYNTH_LEAD_SEC in app.js. (Was 0.08 s, which folded the synth's ~70 ms wall-time
+# attack into this content-time shift: the two only cancel at 1x, so markers/MIDI sat
+# ~70 ms early and playback rushed at 0.5x / dragged at 1.5x.)
+ONSET_COMP_SEC = 0.0
 # GM percussion pitches for exported MIDI (user-requested map).
 GM_MAP = {"kick": 36, "snare": 38, "hihat": 42, "tom": 45, "cymbal": 49}
 GRID_Q = {"1/8": Fraction(1, 2), "1/16": Fraction(1, 4), "1/16T": Fraction(1, 6), "1/32": Fraction(1, 8)}
