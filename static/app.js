@@ -1193,15 +1193,19 @@ function updateCounts() {
 function rebuildPart(events) {
   if (engine.part) { try { engine.part.dispose(); } catch (e) {} engine.part = null; }
   const flat = [];
-  // schedule in transport time = content time / speed, so MIDI tracks the audio rate
-  for (const cls in events) for (const t of events[cls]) flat.push({ time: t / engine.speed, cls: cls });
+  // Schedule in transport time = content time / speed, so MIDI tracks the audio rate, and
+  // bake the wall-fixed synth lead (SYNTH_LEAD_SEC) straight into the event time, clamped
+  // to >= 0. Transport seconds ARE wall seconds, so shifting the event earlier gives the
+  // same speed-independent lead as the old per-callback subtraction -- but the voice now
+  // fires at the callback's own `time`, which Tone guarantees is ~lookAhead in the future.
+  // Subtracting the lead from `time` INSIDE the callback (the old way) ate into that
+  // lookAhead margin: with the lead ~= lookAhead (0.09 vs 0.1), main-thread jitter and
+  // dense passages pushed the trigger time into the past, so Web Audio fired those notes
+  // late or dropped them. Baking keeps the full margin, so every note lands.
+  for (const cls in events) for (const t of events[cls]) flat.push({ time: Math.max(0, t / engine.speed - SYNTH_LEAD_SEC), cls: cls });
   flat.sort((a, b) => a.time - b.time);
   if (!flat.length) return;
-  // Fire the synth a wall-fixed lead early so its audible attack lands on the beat at
-  // every speed (see SYNTH_LEAD_SEC). The Part callback runs ~lookAhead (0.1 s) before
-  // `time`, so subtracting the lead still schedules in the future; trigger() try/catches
-  // the rare start-of-track note whose lead would fall before now.
-  engine.part = new Tone.Part((time, ev) => engine.synths.trigger(ev.cls, time - SYNTH_LEAD_SEC), flat).start(0);
+  engine.part = new Tone.Part((time, ev) => engine.synths.trigger(ev.cls, time), flat).start(0);
 }
 
 async function fetchEvents() {
