@@ -34,7 +34,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-APP_VERSION = "6.1"
+APP_VERSION = "6.2"
 APP_DIR = Path(__file__).resolve().parent
 WORK = APP_DIR / "workdir"
 UPLOADS = WORK / "uploads"
@@ -47,6 +47,7 @@ for d in (UPLOADS, STEMS, ACTS, OUT, DEMUCS_TMP):
 
 PYEXE = sys.executable
 WORKER = APP_DIR / "adtof_worker.py"
+TEMPO_VERSION = 2  # keep in sync with adtof_worker.TEMPO_VERSION; older caches get a tempo-only refresh
 
 # Model output channel order (ADTOF LABELS_5 = [35, 38, 47, 42, 49]).
 # NOTE: channel 2 is TOM and channel 3 is HI-HAT -- the package defaults
@@ -431,6 +432,19 @@ def adtof_thread(params: dict) -> None:
             job.log.append("[cache] reusing activation curves for this audio + fps")
 
         meta = json.loads((act_dir / "meta.json").read_text())
+        if meta.get("tempo_v") != TEMPO_VERSION:
+            # cache predates the current tempo detector -- refresh just the tempo
+            # (librosa only, seconds) instead of re-running inference
+            job.message = "Refreshing tempo detection ..."
+            rc = stream_subprocess(job, [PYEXE, str(WORKER), "--audio", str(wav),
+                                         "--out-dir", str(act_dir), "--tempo-only"])
+            if job.cancelled:
+                job.finish("cancelled", "Transcription stopped -- worker terminated")
+                return
+            if rc == 0:
+                meta = json.loads((act_dir / "meta.json").read_text())
+            else:
+                job.log.append("[warn] tempo refresh failed, keeping the cached tempo")
         with STATE_LOCK:
             STATE["acts"] = {
                 "key": key, "dir": str(act_dir), "fps": meta["fps"],
