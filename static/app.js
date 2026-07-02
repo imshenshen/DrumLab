@@ -557,15 +557,17 @@ const CHUNK_BEHIND = 1;   // chunks kept cached behind it
 const SCHED_TICK_MS = 120;
 
 // Fire the synth this many wall-seconds EARLY so its audible attack lands on the beat.
-// MEASURED (Tone.Offline render of the real voices): every voice fires within ~1 ms of
-// its trigger, amplitude-peaking ~3-5 ms later (kick/snare/hihat/tom); the ride cymbal is
-// a slow swell (~15 ms) by design. So the true attack is only a few ms -- this lead is
-// small on purpose. It is wall-fixed (never scaled by speed) so the feel holds at every
-// rate, and kept OUT of the picked onset times (app.py ONSET_COMP_SEC), which mark the
-// true transient for the markers + MIDI export. With ONSET_COMP_SEC=0 there is no
-// content-time term at all, so there is no speed-dependent drift.
-// (A large lead here -- 0.07-0.09 was tried -- flams the synth well ahead of the real
-// drum stem: it was built on a wrong "kick attack is ~70 ms" assumption, since disproved.)
+// Wall-time lead that makes transport-scheduled sounds land ON the audible beat.
+// MEASURED (recorded master output, lane hits vs transport-grid events): the lane audio
+// plays ~context.lookAhead (0.1 s) EARLY relative to the transport timeline, because the
+// chunk scheduler pairs raw ctx.currentTime with Tone.Transport.seconds -- and that getter
+// reports the position at now() = currentTime + lookAhead. The synth voices themselves
+// fire within ~1 ms of their trigger (Tone.Offline render), so this lead exists to meet
+// the early audio, not to cover any synth attack. The metronome click shares it for the
+// same reason. It is wall-fixed (never scaled by speed) so the feel holds at every rate,
+// and kept OUT of the picked onset times (app.py ONSET_COMP_SEC), which mark the true
+// transient for the markers + MIDI export. With ONSET_COMP_SEC=0 there is no content-time
+// term at all, so there is no speed-dependent drift.
 // TWEAK ME by ear: raise if the synth trails the track, lower if it anticipates.
 const SYNTH_LEAD_SEC = 0.09;
 
@@ -808,6 +810,7 @@ function setSpeed(s) {
     engine.speed = s;
     Tone.Transport.seconds = c / s;
     rebuildPart(roll.events || {});
+    rescheduleMetro();   // the click interval is in transport (wall) seconds = beat / speed
     if (loop.active) { try { Tone.Transport.setLoopPoints(loop.start / s, loop.end / s); } catch (e) {} }
     updateCursors(c);
     setLog("Speed " + s.toFixed(2) + "×");
@@ -915,6 +918,92 @@ function updateLoopOverlays() {
     ov.style.width = Math.abs(x1 - x0) + "px";
   }
 }
+
+/* ------------------------------------------------------------------ */
+/* metronome                                                           */
+/* ------------------------------------------------------------------ */
+// Click track scheduled on the transport, locked to the detected tempo (bpm
+// override = hand fine-tune, null = follow the song). Feeds `master` directly,
+// bypassing mute/solo — the click should survive any mixer state.
+const metro = { on: false, bpm: null, beats: 4, offset: 0, eventId: null, schedBpm: null };
+const metroGain = new Tone.Gain(0.7).connect(master);
+const metroSynth = new Tone.Synth({
+  oscillator: { type: "sine" },
+  envelope: { attack: 0.001, decay: 0.05, sustain: 0, release: 0.03 },
+}).connect(metroGain);
+
+function metroBpm() { return metro.bpm || engine.tempo || null; }
+
+function renderMetro() {
+  const bpm = metroBpm();
+  $("metro-toggle").classList.toggle("on", metro.on);
+  $("metro-readout").textContent = (bpm ? bpm.toFixed(1) : "--") + " · " + metro.beats + "/4";
+  $("metro-auto").disabled = metro.bpm === null;
+  const bpmEl = $("metro-bpm");
+  if (document.activeElement !== bpmEl) bpmEl.value = bpm ? bpm.toFixed(1) : "";
+  const offEl = $("metro-offset");
+  if (document.activeElement !== offEl) offEl.value = String(Math.round(metro.offset * 100) / 100);
+}
+
+function rescheduleMetro() {
+  if (metro.eventId !== null) { try { Tone.Transport.clear(metro.eventId); } catch (e) {} metro.eventId = null; }
+  metro.schedBpm = null;
+  const bpm = metroBpm();
+  if (metro.on && bpm) {
+    metro.schedBpm = bpm;
+    const beatSec = 60 / bpm;                                  // content seconds per beat
+    const interval = beatSec / engine.speed;                   // transport (wall) seconds
+    const phase = ((metro.offset % beatSec) + beatSec) % beatSec;
+    // The lane audio sounds SYNTH_LEAD_SEC-ish early vs the transport timeline (see the
+    // constant), so the click carries the same wall lead — baked into the schedule, NOT
+    // subtracted at fire time (that eats the lookAhead margin; see rebuildPart). Trigger
+    // at the callback's own `time`, which Tone guarantees is ~lookAhead in the future.
+    let start = phase / engine.speed - SYNTH_LEAD_SEC;
+    while (start < 0) start += interval;
+    metro.eventId = Tone.Transport.scheduleRepeat((time) => {
+      const c = (Tone.Transport.getSecondsAtTime(time) + SYNTH_LEAD_SEC) * engine.speed;
+      const idx = Math.round((c - metro.offset) / beatSec);
+      const accent = metro.beats > 1 && ((idx % metro.beats) + metro.beats) % metro.beats === 0;
+      try { metroSynth.triggerAttackRelease(accent ? 1760 : 1175, 0.05, time, accent ? 1.0 : 0.6); } catch (e) {}
+    }, interval, start);
+  }
+  renderMetro();
+}
+
+// the effective tempo changed (new pick / new song) — re-lock unless hand-tuned
+function metroTempoChanged() {
+  if (metro.on && metro.bpm === null && metro.schedBpm !== metroBpm()) rescheduleMetro();
+  else renderMetro();
+}
+
+$("metro-toggle").addEventListener("click", async () => {
+  metro.on = !metro.on;
+  if (metro.on) {
+    await ensureAudio();
+    if (!metroBpm()) setLog("Metronome armed — it starts clicking once a tempo is known (run the transcription, or type a BPM in its settings)");
+  }
+  rescheduleMetro();
+});
+$("metro-open").addEventListener("click", () => { $("metro-panel").classList.toggle("hidden"); renderMetro(); });
+document.addEventListener("click", (e) => {
+  if (!$("metro-wrap").contains(e.target)) $("metro-panel").classList.add("hidden");
+});
+$("metro-bpm").addEventListener("change", () => {
+  const v = parseFloat($("metro-bpm").value);
+  if (isFinite(v)) metro.bpm = Math.min(400, Math.max(20, v));
+  rescheduleMetro();
+});
+$("metro-half").addEventListener("click", () => { const b = metroBpm(); if (b) { metro.bpm = Math.max(20, b / 2); rescheduleMetro(); } });
+$("metro-double").addEventListener("click", () => { const b = metroBpm(); if (b) { metro.bpm = Math.min(400, b * 2); rescheduleMetro(); } });
+$("metro-auto").addEventListener("click", () => { metro.bpm = null; rescheduleMetro(); });
+$("metro-sig").addEventListener("change", () => { metro.beats = parseInt($("metro-sig").value, 10) || 4; renderMetro(); });
+$("metro-offset").addEventListener("change", () => {
+  const v = parseFloat($("metro-offset").value);
+  if (isFinite(v)) metro.offset = v;
+  rescheduleMetro();
+});
+$("metro-mark").addEventListener("click", () => { metro.offset = Math.round(nowContent() * 100) / 100; rescheduleMetro(); });
+$("metro-vol").addEventListener("input", () => { metroGain.gain.value = parseFloat($("metro-vol").value); });
 
 /* ------------------------------------------------------------------ */
 /* scroll + zoom sync                                                  */
@@ -1233,6 +1322,7 @@ async function fetchEvents() {
   const d = await api("/api/events");
   roll.events = d.events;
   engine.tempo = d.tempo;
+  metroTempoChanged();
   const manual = Math.abs(d.tempo - d.detected_tempo) > 0.001;
   $("tempo-display").textContent = d.tempo.toFixed(1) + " BPM" + (manual ? " (manual)" : "");
   $("out-tempo").textContent = manual
@@ -1528,6 +1618,7 @@ const playlist = {
   party: false,
   loading: false,
   autoplay: false,    // pressing play with nothing loaded but a queued song: play it once loaded
+  autoNext: false,    // autoplay toggle: when a song ends, load + play the next queued one
 };
 
 function updateShuffleBtn() {
@@ -1748,6 +1839,19 @@ $("btn-shuffle").addEventListener("click", () => {
 $("queue-prev").addEventListener("click", prevSong);
 $("queue-next").addEventListener("click", nextSong);
 $("queue-clear").addEventListener("click", clearQueue);
+
+function updateAutoplayBtn() {
+  const btn = $("btn-autoplay");
+  btn.classList.toggle("on", playlist.autoNext);
+  btn.classList.toggle("off", !playlist.autoNext);
+  btn.title = playlist.autoNext
+    ? "Autoplay ON — the next queued song starts when this one ends. Click to turn off."
+    : "Autoplay OFF — click to start the next queued song automatically when this one ends.";
+}
+$("btn-autoplay").addEventListener("click", () => {
+  playlist.autoNext = !playlist.autoNext;
+  updateAutoplayBtn();
+});
 
 /* ---- drop OS audio files onto the queue panel to enqueue them ---- */
 const QUEUE_DROP_EXTS = ["wav", "mp3", "flac", "m4a", "ogg", "aac", "aiff", "opus"];
@@ -2183,7 +2287,11 @@ async function poll(fast) {
       $("tempo-display").textContent = "";
       $("out-tempo").textContent = "";
       $("out-bpm").value = "";
-      $("zoom").value = 0;  // fit the whole new file
+      // zoom is deliberately NOT reset — the zoom level carries across track changes
+      engine.tempo = null;   // stale until the new song's transcription arrives
+      metro.bpm = null;      // drop the hand-tune; re-lock onto the new song's tempo
+      metro.offset = 0;
+      rescheduleMetro();
       // The transport keeps running while the new file decodes, so by the time the lane
       // renders the needle has crept forward (and the new song starts mid-way). Pin it
       // back to 0 once loading finishes so a track change always plays from the top.
@@ -2262,6 +2370,12 @@ function raf() {
       Tone.Transport.pause();
       stopAudio();
       Tone.Transport.seconds = engine.duration / engine.speed;
+      // autoplay: hand the transport to the next queued song (party shuffle refills the queue)
+      if (playlist.autoNext && !playlist.loading &&
+          (playlist.queue.length || (playlist.party && playlist.songs.length))) {
+        playlist.autoplay = true;   // poll() presses play once the new song's lane loads
+        nextSong();
+      }
     }
   }
   renderPlayButton();
@@ -2283,6 +2397,8 @@ engine.synths = makeSynths();
 applyMix();
 renderStemLanes();   // show placeholder lanes for the default selection
 applyZoom();
+renderMetro();
+updateAutoplayBtn();
 poll(true);
 loadLibrary();       // index any --library roots; enables party shuffle if configured
 requestAnimationFrame(raf);
