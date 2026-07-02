@@ -1205,11 +1205,59 @@ function autoFitMetro() {
   // density, dropout and 16th-note fills (0 misses).
   const good = best.inliers >= 8 && best.rms < 0.035 && best.coverage >= 0.55;
   if (!good) return null;
+  const period = 60 / best.bpm;
   return {
     bpm: Math.round(best.bpm * 10) / 10,
-    offset: Math.round(best.offset * 1000) / 1000,
-    inliers: best.inliers, total,
+    // the fit nails the beat GRID, but its offset sits on an arbitrary beat of
+    // the bar — anchor it to the likeliest downbeat so the accent lands on 1
+    offset: Math.round(downbeatOffset(period, best.offset, metro.beats) * 1000) / 1000,
+    period, inliers: best.inliers, total,
   };
+}
+
+// The fitted grid gives the pulse and phase but not WHICH beat is "1" — every
+// beat is an equally good gridline, so the accent could land on any of them.
+// Pick the downbeat (offset shifted by 0..beats-1 beats) that best matches how
+// drums normally sit in a bar: the kick anchors beat 1 (most) and the other
+// strong beats, the snare plays the backbeat. For each candidate downbeat we
+// bucket every kick/snare onset into its beat-of-bar and score
+//   kicks on strong beats (beat 1 weighted highest)  + snares on the backbeat
+//   − kicks on the backbeat
+// Beat 1 is weighted above the other strong beats, and the song's first onset
+// adds a small "songs start on a downbeat" tie-breaker — together they resolve
+// the otherwise-symmetric 1-vs-3 of a plain rock beat (kick 1&3, snare 2&4).
+// A truly symmetric groove that also doesn't start on 1 is genuinely ambiguous
+// from drums alone — that's what the manual "@ playhead" anchor is for. Falls
+// back to the unshifted offset when there's no kick/snare; beats<=1 has no bar.
+function downbeatOffset(period, offset, beats) {
+  if (beats <= 1) return offset;
+  const kick = (roll.events && roll.events.kick) || [];
+  const snare = (roll.events && roll.events.snare) || [];
+  if (!kick.length && !snare.length) return offset;
+  const tol = period * METRO_TOL_FRAC;
+  const beatOf = (t, s) => {                                  // beat-of-bar for shift s, or -1 off-grid
+    const idxF = (t - offset) / period;
+    const idx = Math.round(idxF);
+    if (Math.abs(idxF - idx) * period > tol) return -1;
+    return ((idx - s) % beats + beats) % beats;
+  };
+  const half = beats / 2;
+  const strongW = (b) => b === 0 ? 1.5 : (beats % 2 === 0 && b === half ? 1 : 0); // beat 1 > beat 3
+  const back = (b) => beats % 2 === 0 && (b === Math.floor(beats / 4) || b === Math.floor(beats / 4) + half);
+  // the very first on-grid onset of the song — songs usually start on a downbeat,
+  // so this breaks the otherwise-symmetric 1-vs-3 tie a plain rock beat (kick on
+  // 1&3, snare on 2&4) leaves. Small on purpose: it only decides genuine ties,
+  // never overrides a clear kick/snare majority (e.g. a song with a pickup).
+  const first = allNoteTimes().find((t) => beatOf(t, 0) >= 0);
+  let bestS = 0, bestScore = -Infinity;
+  for (let s = 0; s < beats; s++) {
+    let sc = 0;
+    for (const t of kick)  { const b = beatOf(t, s); if (b < 0) continue; sc += strongW(b) || (back(b) ? -1 : 0); }
+    for (const t of snare) { const b = beatOf(t, s); if (b < 0) continue; sc += back(b) ? 1 : 0; }
+    if (first != null && beatOf(first, s) === 0) sc += 0.5;  // song starts on beat 1 (tie-breaker only)
+    if (sc > bestScore) { bestScore = sc; bestS = s; }
+  }
+  return offset + bestS * period;
 }
 
 function startMetroPick() {
@@ -1278,7 +1326,14 @@ $("metro-bpm").addEventListener("change", () => {
 $("metro-half").addEventListener("click", () => { const b = metroBpm(); if (b) { metro.bpm = Math.max(20, b / 2); rescheduleMetro(); } });
 $("metro-double").addEventListener("click", () => { const b = metroBpm(); if (b) { metro.bpm = Math.min(400, b * 2); rescheduleMetro(); } });
 $("metro-auto").addEventListener("click", () => { metro.bpm = null; metro.auto = autoFitMetro(); rescheduleMetro(); });
-$("metro-sig").addEventListener("change", () => { metro.beats = parseInt($("metro-sig").value, 10) || 4; renderMetro(); });
+$("metro-sig").addEventListener("change", () => {
+  metro.beats = parseInt($("metro-sig").value, 10) || 4;
+  // the downbeat depends on the meter — re-anchor the auto grid's beat 1 to it
+  if (metro.auto && metro.auto.period) {
+    metro.auto.offset = Math.round(downbeatOffset(metro.auto.period, metro.auto.offset, metro.beats) * 1000) / 1000;
+  }
+  rescheduleMetro();
+});
 $("metro-offset").addEventListener("change", () => {
   const v = parseFloat($("metro-offset").value);
   if (isFinite(v)) metro.offset = v;
