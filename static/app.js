@@ -556,6 +556,19 @@ const CHUNK_AHEAD = 2;    // chunks scheduled ahead of the playhead
 const CHUNK_BEHIND = 1;   // chunks kept cached behind it
 const SCHED_TICK_MS = 120;
 
+// Fire the synth this many wall-seconds EARLY so its audible attack lands on the beat.
+// MEASURED (Tone.Offline render of the real voices): every voice fires within ~1 ms of
+// its trigger, amplitude-peaking ~3-5 ms later (kick/snare/hihat/tom); the ride cymbal is
+// a slow swell (~15 ms) by design. So the true attack is only a few ms -- this lead is
+// small on purpose. It is wall-fixed (never scaled by speed) so the feel holds at every
+// rate, and kept OUT of the picked onset times (app.py ONSET_COMP_SEC), which mark the
+// true transient for the markers + MIDI export. With ONSET_COMP_SEC=0 there is no
+// content-time term at all, so there is no speed-dependent drift.
+// (A large lead here -- 0.07-0.09 was tried -- flams the synth well ahead of the real
+// drum stem: it was built on a wrong "kick attack is ~70 ms" assumption, since disproved.)
+// TWEAK ME by ear: raise if the synth trails the track, lower if it anticipates.
+const SYNTH_LEAD_SEC = 0.09;
+
 function makeChunkScheduler(laneName, chunkQuery) {
   const dest = laneGains[laneName];
   const extraQ = chunkQuery || "";
@@ -768,10 +781,12 @@ function seekAll(c) {
 }
 
 // A speed change needs a one-time server render of the stretched audio (cached
-// after). We debounce the knob so a sweep triggers one render, and — while playing
-// — keep the current speed audible until the new chunks are ready, then swap at the
-// live playhead so there's no silent gap.
-let _speedTimer = null, _speedTarget = null;
+// after; rubberband takes ~10 s on a full song, so the wait is real on the first
+// hit of a speed). We debounce the knob so a sweep triggers one render, and —
+// while playing — pause the transport for the render so the clock can't run ahead
+// of audio that isn't ready, then resume at the same spot once the playhead chunk
+// is decoded.
+let _speedTimer = null, _speedTarget = null, _speedPaused = false;
 function setSpeedDebounced(s) {
   _speedTarget = s;
   if (_speedTimer) clearTimeout(_speedTimer);
@@ -779,22 +794,41 @@ function setSpeedDebounced(s) {
 }
 
 function setSpeed(s) {
+  const resume = (c) => {
+    _speedPaused = false;
+    // transport before audio (see togglePlay): pump() needs state "started"
+    Tone.Transport.start();
+    startAudio(c);
+    renderPlayButton();
+  };
   const commit = () => {
-    if (_speedTarget !== s) return;   // superseded by a newer target
+    if (_speedTarget !== s) return;   // superseded; the newer target's commit resumes
+    const paused = _speedPaused; _speedPaused = false;
     const c = nowContent();
     engine.speed = s;
     Tone.Transport.seconds = c / s;
     rebuildPart(roll.events || {});
     if (loop.active) { try { Tone.Transport.setLoopPoints(loop.start / s, loop.end / s); } catch (e) {} }
     updateCursors(c);
-    if (Tone.Transport.state === "started") { stopAudio(); startAudio(c); }
+    setLog("Speed " + s.toFixed(2) + "×");
+    if (Tone.Transport.state === "started") { stopAudio(); startAudio(c); }  // user resumed by hand mid-render
+    else if (paused) resume(c);
     else for (const lane of laneList()) lane.sched.prefetch(s, c);
   };
-  if (Math.abs(s - engine.speed) < 1e-4) return;
+  if (Math.abs(s - engine.speed) < 1e-4) {
+    // knob came back to the current speed — nothing to render, just resume if we paused
+    if (_speedPaused) {
+      _speedPaused = false;
+      if (Tone.Transport.state !== "started") resume(nowContent());
+      setLog("Speed " + s.toFixed(2) + "×");
+    }
+    return;
+  }
   if (Tone.Transport.state === "started" && laneList().length) {
-    // pre-render the stretched audio at the playhead before swapping (no gap)
-    const cur = Math.max(0, Math.floor(nowContent() / CHUNK_SEC));
+    Tone.Transport.pause(); stopAudio(); _speedPaused = true;
+    renderPlayButton();
     if (s !== 1.0) setLog("Rendering " + s.toFixed(2) + "× audio …");
+    const cur = Math.max(0, Math.floor(nowContent() / CHUNK_SEC));
     Promise.all(laneList().map((l) => l.sched.fetch(s, cur))).then(commit).catch(commit);
   } else commit();
 }
@@ -1180,8 +1214,16 @@ function updateCounts() {
 function rebuildPart(events) {
   if (engine.part) { try { engine.part.dispose(); } catch (e) {} engine.part = null; }
   const flat = [];
-  // schedule in transport time = content time / speed, so MIDI tracks the audio rate
-  for (const cls in events) for (const t of events[cls]) flat.push({ time: t / engine.speed, cls: cls });
+  // Schedule in transport time = content time / speed, so MIDI tracks the audio rate, and
+  // bake the wall-fixed synth lead (SYNTH_LEAD_SEC) straight into the event time, clamped
+  // to >= 0. Transport seconds ARE wall seconds, so shifting the event earlier gives the
+  // same speed-independent lead as the old per-callback subtraction -- but the voice now
+  // fires at the callback's own `time`, which Tone guarantees is ~lookAhead in the future.
+  // Subtracting the lead from `time` INSIDE the callback (the old way) ate into that
+  // lookAhead margin: with the lead ~= lookAhead (0.09 vs 0.1), main-thread jitter and
+  // dense passages pushed the trigger time into the past, so Web Audio fired those notes
+  // late or dropped them. Baking keeps the full margin, so every note lands.
+  for (const cls in events) for (const t of events[cls]) flat.push({ time: Math.max(0, t / engine.speed - SYNTH_LEAD_SEC), cls: cls });
   flat.sort((a, b) => a.time - b.time);
   if (!flat.length) return;
   engine.part = new Tone.Part((time, ev) => engine.synths.trigger(ev.cls, time), flat).start(0);

@@ -1,6 +1,6 @@
-# Drumlab
+# DrumLab
 
-![Drumlab](screenshot.png)
+![DrumLab](screenshot.png)
 
 A GUI wrapper around [Demucs](https://github.com/adefossez/demucs) and
 [ADTOF](https://github.com/xavriley/ADTOF-pytorch) that separates a song into
@@ -14,6 +14,10 @@ offline, nothing leaves your computer.
 
 ## Features
 
+- **Play from your library** — point DrumLab at your music folders to build a searchable,
+  artist-grouped song library, then select tracks straight from the browser.
+- **Play queue** — pick from the library, drag files in directly or use **party shuffle**
+  for play-along convenience.
 - **Separate the track** — runs Demucs (full `htdemucs` separation) to split the song into
   drums / bass / other / vocals. Pick which sources to isolate; the rest can be summed into a
   single backing track.
@@ -40,7 +44,7 @@ Everything installs into a single Python environment:
 - **[Demucs](https://github.com/adefossez/demucs)** — source separation, invoked as
   `python -m demucs`.
 - **[ADTOF-pytorch](https://github.com/xavriley/ADTOF-pytorch)** — the drum-transcription
-  model (imported as `adtof_pytorch`). Drumlab uses it as an installed package, or finds a
+  model (imported as `adtof_pytorch`). DrumLab uses it as an installed package, or finds a
   sibling checkout at `../ADTOF-pytorch/src/adtof_pytorch`.
 - **FastAPI + Uvicorn + python-multipart + music21** — the web server and MusicXML export.
   These are pure-Python and don't touch torch.
@@ -55,7 +59,7 @@ Everything installs into a single Python environment:
 > Everything still runs — just on the CPU. So: install torch, then everything else, then
 > verify CUDA is still there.
 
-1. **Get the code** (Drumlab and, optionally, ADTOF-pytorch side by side):
+1. **Get the code** (DrumLab and, optionally, ADTOF-pytorch side by side):
 
    ```sh
    git clone https://github.com/DomekRomek/Drumlab.git
@@ -101,10 +105,6 @@ Everything installs into a single Python environment:
 6. **Install FFmpeg** if you don't have it ([download](https://ffmpeg.org/download.html)),
    and make sure `ffmpeg` is on your `PATH`.
 
-```sh
-python app.py --preload
-```
-
 ---
 
 ## Run
@@ -122,13 +122,12 @@ This starts the server on `127.0.0.1:8765` and opens it in your default browser.
 | `--host ADDR` | bind address (default `127.0.0.1`; `0.0.0.0` to expose on your LAN) |
 | `--no-browser` | don't open a browser window |
 | `--preload` | download all Demucs models, then exit |
-| `--library FOLDER` | index a folder for the song library / party shuffle (repeatable; defaults to your **Music** folder when launched via `run.ps1`) |
+| `--library FOLDER` | index a folder for the song library / party shuffle (repeatable) |
 
 > **Song library.** The party-shuffle / up-next browser indexes folders you point it at.
-> `run.ps1` defaults this to your Windows **Music** folder — edit the `-Library` parameter at
-> the top of `run.ps1` to point elsewhere, pass `.\run.ps1 -Library 'D:\Music'` for a one-off,
-> or set it to `''` to start empty and pick a folder from the UI. Launching `app.py` directly,
-> use `--library FOLDER` (repeatable).
+> Pass `--library FOLDER` (repeatable) to index one or more folders at startup — e.g.
+> `python app.py --library "D:\Music"` — or start without it and pick a folder from the UI.
+> With no library configured the browser just starts empty.
 
 > **Single shared workspace.** DrumLab is a single-user tool: the server keeps one
 > global state (current song, stems, transcription). Every browser that connects —
@@ -144,7 +143,7 @@ This starts the server on `127.0.0.1:8765` and opens it in your default browser.
 ```
 app.py                 FastAPI server + pipeline orchestration + exports
 adtof_worker.py        ADTOF inference, run as a separate killable subprocess
-requirements-extra.txt Drumlab's own (non-torch) dependencies
+requirements-extra.txt DrumLab's own (non-torch) dependencies
 static/                single-page UI (index.html, app.js, style.css, score viewer)
 static/vendor/         pinned local copies of WaveSurfer, Tone.js, OSMD (no CDN)
 workdir/               runtime caches + generated downloads — safe to delete

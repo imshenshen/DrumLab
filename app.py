@@ -19,6 +19,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -33,7 +34,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-APP_VERSION = "5.0"
+APP_VERSION = "6.0"
 APP_DIR = Path(__file__).resolve().parent
 WORK = APP_DIR / "workdir"
 UPLOADS = WORK / "uploads"
@@ -56,13 +57,17 @@ CH_NAMES = ["kick", "snare", "tom", "hihat", "cymbal"]
 DEFAULT_THRESHOLDS = {"kick": 0.22, "snare": 0.24, "tom": 0.32, "hihat": 0.22, "cymbal": 0.30}
 # Audio extensions the library scanner and the upload picker both accept.
 AUDIO_EXTS = {".wav", ".mp3", ".flac", ".m4a", ".ogg", ".aac", ".aiff", ".opus"}
-# Onset-latency compensation: the model's activation peaks a few frames AFTER the
-# real transient (spectrogram framing is center=True, so i/fps is otherwise exact),
-# so every picked hit lands late against the audio. Shift all onsets earlier by this
-# many seconds. Applied once in do_pick(), so it flows to the roll, the synth, and the
-# MIDI/MusicXML exports alike. TWEAK ME by ear: raise if the synth still trails the
-# track, lower if it now anticipates; a re-pick (instant) applies the new value.
-ONSET_COMP_SEC = 0.08
+# Onset-latency compensation: cancel ONLY the model's own activation latency so a
+# picked onset marks the TRUE audio transient. Measured against real drum onsets the
+# activation peak trails the transient by ~9 ms (spectrogram framing is center=True,
+# so i/fps is otherwise exact), so this is small. Applied once in do_pick(), it flows
+# to the roll markers and the MIDI/MusicXML exports, which must line up with the actual
+# hits (not be pre-shifted). The SYNTH's playback feel is a SEPARATE concern: its voices
+# have an audible attack fixed in WALL time, so it is led there, not here -- see
+# SYNTH_LEAD_SEC in app.js. (Was 0.08 s, which folded the synth's ~70 ms wall-time
+# attack into this content-time shift: the two only cancel at 1x, so markers/MIDI sat
+# ~70 ms early and playback rushed at 0.5x / dragged at 1.5x.)
+ONSET_COMP_SEC = 0.0
 # GM percussion pitches for exported MIDI (user-requested map).
 GM_MAP = {"kick": 36, "snare": 38, "hihat": 42, "tom": 45, "cymbal": 49}
 GRID_Q = {"1/8": Fraction(1, 2), "1/16": Fraction(1, 4), "1/16T": Fraction(1, 6), "1/32": Fraction(1, 8)}
@@ -940,9 +945,9 @@ def get_audio(which: str, parts: Optional[str] = None):
 
 # Chunked, pitch-preserved playback streaming. The client plays audio as a window
 # of short chunks scheduled on the Web Audio clock, so RAM is bounded by the window
-# (not the song length) and stays sample-aligned with the MIDI. Speed changes reuse
-# the export's atempo: one continuous whole-file stretch (no per-chunk seams), cached,
-# then sliced on demand. Slicing a PCM WAV with input-seek is sample-accurate.
+# (not the song length) and stays sample-aligned with the MIDI. Speed changes render
+# one continuous whole-file stretch (no per-chunk seams), cached, then sliced on
+# demand. Slicing a PCM WAV with input-seek is sample-accurate.
 CHUNKS = WORK / "chunks"
 CHUNKS.mkdir(parents=True, exist_ok=True)
 CHUNK_SEC = 8.0                       # content seconds per chunk (must match app.js)
@@ -950,6 +955,33 @@ _STRETCH_GUARD = threading.Lock()
 _STRETCH_LOCKS: dict = {}             # cache path -> per-file lock (one render at a time)
 # render stretches below normal priority so they never starve demucs/adtof inference
 _LOW_PRIO = subprocess.CREATE_NO_WINDOW | getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0)
+_HAVE_RB: Optional[bool] = None
+
+
+def _have_rubberband() -> bool:
+    """Whether this ffmpeg build carries librubberband (probed once)."""
+    global _HAVE_RB
+    if _HAVE_RB is None:
+        r = subprocess.run(["ffmpeg", "-hide_banner", "-filters"], capture_output=True,
+                           creationflags=subprocess.CREATE_NO_WINDOW, timeout=30)
+        _HAVE_RB = b" rubberband " in r.stdout
+    return _HAVE_RB
+
+
+def _stretch_args(speed: float) -> list:
+    """Pitch-preserving time-stretch filter args. rubberband (phase vocoder with
+    transient preservation) is much smoother than atempo's WSOLA, especially on
+    sustained content at low speeds, at the cost of a slower render (~30x realtime
+    vs near-instant); atempo is the fallback for ffmpeg builds without it."""
+    if _have_rubberband():
+        return ["-filter:a", f"rubberband=tempo={speed:.4f}"]
+    return ["-filter:a", f"atempo={speed:.4f}"]
+
+
+def _stretch_tag() -> str:
+    """Cache-name tag for the active stretch filter, so a build change (or fallback)
+    can't serve files rendered by the other algorithm."""
+    return "rb" if _have_rubberband() else ""
 
 
 def _lane_source(lane: str, parts: Optional[str] = None):
@@ -966,7 +998,8 @@ def _lane_source(lane: str, parts: Optional[str] = None):
 
 def _evict_stretch_cache(keep_bytes: int = 1_500_000_000):
     """LRU-cap the whole-file stretched WAVs (they are large)."""
-    files = sorted(CHUNKS.glob("*x.wav"), key=lambda p: p.stat().st_mtime)
+    files = sorted([*CHUNKS.glob("*x.wav"), *CHUNKS.glob("*xrb.wav")],
+                   key=lambda p: p.stat().st_mtime)
     total = sum(p.stat().st_size for p in files)
     while total > keep_bytes and len(files) > 1:
         victim = files.pop(0)
@@ -975,8 +1008,8 @@ def _evict_stretch_cache(keep_bytes: int = 1_500_000_000):
 
 
 def _ensure_stretched(src: str, key: str, speed: float) -> Path:
-    """Path to a whole-file atempo-stretched WAV for (lane, speed), rendered once."""
-    cached = CHUNKS / f"{key}_{speed:.4f}x.wav"
+    """Path to a whole-file time-stretched WAV for (lane, speed), rendered once."""
+    cached = CHUNKS / f"{key}_{speed:.4f}x{_stretch_tag()}.wav"
     if cached.exists():
         os.utime(cached, None)        # mark recently used for LRU
         return cached
@@ -987,8 +1020,8 @@ def _ensure_stretched(src: str, key: str, speed: float) -> Path:
             return cached
         tmp = cached.with_suffix(".tmp.wav")
         r = subprocess.run(
-            ["ffmpeg", "-y", "-i", str(src), "-filter:a", f"atempo={speed:.4f}",
-             "-c:a", "pcm_s16le", str(tmp)],
+            ["ffmpeg", "-y", "-i", str(src)] + _stretch_args(speed)
+            + ["-c:a", "pcm_s16le", str(tmp)],
             capture_output=True, creationflags=_LOW_PRIO, timeout=600)
         if r.returncode != 0 or not tmp.exists():
             tmp.unlink(missing_ok=True)
@@ -1097,10 +1130,10 @@ def _render_stem(which: str, fmt: str, speed: float, parts: Optional[str]) -> tu
     nice = out_name(f"_{which}{tag}{stag}.{ext}")
     if fmt == "wav" and not stretch:
         return Path(src), nice, mime
-    cached = OUT / f"{skey}_{fmt}{stag}.{ext}"
+    cached = OUT / f"{skey}_{fmt}{stag}{_stretch_tag() if stretch else ''}.{ext}"
     if not cached.exists():
-        # atempo time-stretches with pitch preserved; matches the Speed-knob playback
-        filt = ["-filter:a", f"atempo={speed:.4f}"] if stretch else []
+        # time-stretches with pitch preserved; matches the Speed-knob playback
+        filt = _stretch_args(speed) if stretch else []
         r = subprocess.run(
             ["ffmpeg", "-y", "-i", src] + filt + args + [str(cached)],
             capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW, timeout=600,
@@ -1220,9 +1253,23 @@ def preload_models() -> int:
     return subprocess.run([PYEXE, "-c", code, *models]).returncode
 
 
+def _first_free_port(host: str, start: int) -> int:
+    """First port from `start` that binds on `host` (probe-bind, then release)."""
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    for port in range(start, start + 100):
+        try:
+            with socket.socket(family) as s:
+                s.bind((host, port))
+            return port
+        except OSError:
+            continue
+    raise SystemExit(f"No free port in {start}-{start + 99}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="DrumLab -- local drum transcription GUI")
-    ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument("--port", type=int, default=None,
+                    help="Port to bind (default: first free port from 8765)")
     ap.add_argument("--host", default="127.0.0.1",
                     help="Address to bind (default 127.0.0.1; 0.0.0.0 exposes it on your LAN)")
     ap.add_argument("--no-browser", action="store_true")
@@ -1235,6 +1282,9 @@ def main() -> None:
 
     if args.preload:
         sys.exit(preload_models())
+
+    if args.port is None:
+        args.port = _first_free_port(args.host, 8765)
 
     for root in args.library:
         try:
