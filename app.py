@@ -34,7 +34,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-APP_VERSION = "6.5"
+APP_VERSION = "6.6"
 APP_DIR = Path(__file__).resolve().parent
 WORK = APP_DIR / "workdir"
 UPLOADS = WORK / "uploads"
@@ -860,8 +860,8 @@ def set_tempo(params: dict):
             bpm = float(bpm)
         except (TypeError, ValueError):
             raise HTTPException(400, "Invalid BPM value")
-        if not 20 <= bpm <= 400:
-            raise HTTPException(400, "BPM must be between 20 and 400")
+        if not 20 <= bpm <= 999:
+            raise HTTPException(400, "BPM must be between 20 and 999")
     with STATE_LOCK:
         STATE["tempo_override"] = bpm
     return {"tempo_override": STATE["tempo_override"]}

@@ -1096,10 +1096,10 @@ function fitMetroFromPicks(tA, tB) {
   for (const beats of cands) {
     const period = span / beats;
     const bpm = 60 / period;
-    if (bpm < 20 || bpm > 400) continue;
+    if (bpm < 20 || bpm > 999) continue;
     const r = refineMetroGrid(notes, period, lo);
     const rb = 60 / r.period;
-    if (rb < 20 || rb > 400 || r.inliers < 2) continue;
+    if (rb < 20 || rb > 999 || r.inliers < 2) continue;
     fits.push({ period: r.period, offset: r.offset, inliers: r.inliers, bpm: rb });
   }
   if (!fits.length) return null;
@@ -1130,7 +1130,7 @@ function fitMetroFromPicks(tA, tB) {
   // punished ordinary sparse and busy tracks. A real track — sparse or dense —
   // yields many inliers spanning the song; genuine degeneracy (a handful of
   // scattered solo hits) yields only 1–3.
-  const unlocked = best.inliers < 4 || best.bpm < 20 || best.bpm > 400;
+  const unlocked = best.inliers < 4 || best.bpm < 20 || best.bpm > 999;
   return { bpm: best.bpm, offset: best.offset, inliers: best.inliers, total, unlocked };
 }
 
@@ -1174,11 +1174,11 @@ function autoFitMetro() {
   for (let f = -0.10; f <= 0.10 + 1e-9; f += 0.0025) {
     const period = seedPeriod * (1 + f);
     const bpm = 60 / period;
-    if (bpm < 20 || bpm > 400) continue;
+    if (bpm < 20 || bpm > 999) continue;
     for (const ph of phaseSeeds) {
       const r = refineMetroGrid(notes, period, ph);
       const rb = 60 / r.period;
-      if (rb < 20 || rb > 400 || r.inliers < 4) continue;
+      if (rb < 20 || rb > 999 || r.inliers < 4) continue;
       // stay in the seed's octave — the fine sweep can't wander to a half/double,
       // but the least-squares refit could slide there over a dense subdivision;
       // reject anything that drifted more than ~a semitone from the seed.
@@ -1262,12 +1262,12 @@ function downbeatOffset(period, offset, beats) {
 
 function startMetroPick() {
   if (!roll.events || !allNoteTimes().length) {
-    setLog("No notes to pick from — run the transcription first", true);
+    setLog("Nothing to mark yet — run the transcription first", true);
     return;
   }
   metroPick = { picks: [] };
   $("metro-pick").classList.add("active");
-  setLog("Tap tempo: click two notes on the roll a known number of beats apart (two upbeats work well)");
+  setLog("Mark the tempo: click two points on the roll a whole number of beats apart (two downbeats a bar apart work well) — each click snaps to the nearest hit");
 }
 
 function cancelMetroPick() {
@@ -1280,29 +1280,29 @@ function metroPickClick(x) {
   if (!metroPick) return false;
   const t = (roll.scrollPx + x) / engine.pxPerSec;
   const snapped = nearestNoteTime(t, 12 / engine.pxPerSec);
-  if (snapped === null) { setLog("No note there — click directly on a hit", true); return true; }
+  if (snapped === null) { setLog("No hit there — click directly on a hit", true); return true; }
   metroPick.picks.push(snapped);
   if (metroPick.picks.length < 2) {
-    setLog("Got the first note at " + snapped.toFixed(3) + " s — now click the second");
+    setLog("Marked the first point at " + snapped.toFixed(3) + " s — now click the second, a whole number of beats later");
     return true;
   }
   const [a, b] = metroPick.picks;
   cancelMetroPick();
   const fit = fitMetroFromPicks(a, b);
-  if (!fit) { setLog("Couldn't read a tempo from those two notes — pick two clearer hits", true); return true; }
+  if (!fit) { setLog("Couldn't read a tempo from those two points — mark two clearer hits", true); return true; }
   if (fit.unlocked) {
-    // Grid never locked onto the song's notes — say so and stop trying. Leave
+    // Grid never locked onto the song's hits — say so and stop trying. Leave
     // the existing tempo/offset alone rather than committing a bad guess.
     setLog("Metronome grid unlocked — only " + fit.inliers + " of " + fit.total +
-           " notes fell on that grid, so the tempo wasn't trusted. Existing click unchanged.", true);
+           " hits fell on that grid, so the tempo wasn't trusted. Existing click unchanged.", true);
     return true;
   }
   metro.bpm = Math.round(fit.bpm * 10) / 10;
   metro.offset = Math.round(fit.offset * 1000) / 1000;
   if (!metro.on) { metro.on = true; ensureAudio(); }
   rescheduleMetro();
-  setLog("Metronome locked to " + metro.bpm.toFixed(1) + " BPM from the notes (" +
-         fit.inliers + "/" + fit.total + " on grid), beat 1 at " + metro.offset.toFixed(3) + " s");
+  setLog("Metronome locked to " + metro.bpm.toFixed(1) + " BPM from your marks (" +
+         fit.inliers + "/" + fit.total + " hits on grid), beat 1 at " + metro.offset.toFixed(3) + " s");
   return true;
 }
 
@@ -1320,11 +1320,11 @@ document.addEventListener("click", (e) => {
 });
 $("metro-bpm").addEventListener("change", () => {
   const v = parseFloat($("metro-bpm").value);
-  if (isFinite(v)) metro.bpm = Math.min(400, Math.max(20, v));
+  if (isFinite(v)) metro.bpm = Math.min(999, Math.max(20, v));
   rescheduleMetro();
 });
 $("metro-half").addEventListener("click", () => { const b = metroBpm(); if (b) { metro.bpm = Math.max(20, b / 2); rescheduleMetro(); } });
-$("metro-double").addEventListener("click", () => { const b = metroBpm(); if (b) { metro.bpm = Math.min(400, b * 2); rescheduleMetro(); } });
+$("metro-double").addEventListener("click", () => { const b = metroBpm(); if (b) { metro.bpm = Math.min(999, b * 2); rescheduleMetro(); } });
 $("metro-auto").addEventListener("click", () => { metro.bpm = null; metro.auto = autoFitMetro(); rescheduleMetro(); });
 $("metro-sig").addEventListener("change", () => {
   metro.beats = parseInt($("metro-sig").value, 10) || 4;

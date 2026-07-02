@@ -65,7 +65,7 @@
       <div id="metro-panel" class="hidden">
         <div class="metro-row" title="Metronome tempo. Locks onto the detected tempo; type a value to fine-tune it by hand. Auto returns to the detected tempo.">
           <span class="metro-lab">Tempo</span>
-          <input type="number" id="metro-bpm" min="20" max="400" step="0.1" placeholder="--">
+          <input type="number" id="metro-bpm" min="20" max="999" step="0.1" placeholder="--">
           <button id="metro-half" class="q-mini" title="Halve the tempo — beat tracking sometimes lands on double time">&frac12;&times;</button>
           <button id="metro-double" class="q-mini" title="Double the tempo — beat tracking sometimes lands on half time">2&times;</button>
           <button id="metro-auto" class="q-mini" title="Follow the detected tempo again">Auto</button>
@@ -88,9 +88,9 @@
           <input type="number" id="metro-offset" step="0.01" value="0">
           <button id="metro-mark" class="q-mini" title="Place beat 1 at the current playhead — pause on a downbeat first">@ playhead</button>
         </div>
-        <div class="metro-row" title="Set the tempo and beat 1 from the MIDI notes — click, then click two hits on the roll a whole number of beats apart (two upbeats work well). Locks to the notes that sit on that grid; if too few do, it says so in the footer and leaves the click alone.">
-          <span class="metro-lab">From notes</span>
-          <button id="metro-pick" class="q-mini" title="Arm two-note tempo pick, then click two hits on the roll">Set from 2 notes</button>
+        <div class="metro-row" title="Set the tempo and beat 1 by marking two points on the roll a whole number of beats apart — you don't tap every beat, just two (two downbeats a bar apart work well). It fits the grid to the hits that land on it; if too few do, it says so in the footer and leaves the click alone.">
+          <span class="metro-lab">Set grid</span>
+          <button id="metro-pick" class="q-mini" title="Mark two points a whole number of beats apart on the roll to set the tempo and beat 1">Mark 2 beats</button>
         </div>
         <div class="metro-row" title="Click volume">
           <span class="metro-lab">Volume</span>
@@ -272,7 +272,7 @@
         </select>
       </label>
       <label title="Manual tempo for the exports and score. Leave empty to use the detected tempo.">BPM
-        <input type="number" id="out-bpm" min="20" max="400" step="0.1" placeholder="auto">
+        <input type="number" id="out-bpm" min="20" max="999" step="0.1" placeholder="auto">
       </label>
     </div>
     <div class="row">
