@@ -19,6 +19,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -33,7 +34,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-APP_VERSION = "5.5"
+APP_VERSION = "5.6"
 APP_DIR = Path(__file__).resolve().parent
 WORK = APP_DIR / "workdir"
 UPLOADS = WORK / "uploads"
@@ -1252,9 +1253,23 @@ def preload_models() -> int:
     return subprocess.run([PYEXE, "-c", code, *models]).returncode
 
 
+def _first_free_port(host: str, start: int) -> int:
+    """First port from `start` that binds on `host` (probe-bind, then release)."""
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    for port in range(start, start + 100):
+        try:
+            with socket.socket(family) as s:
+                s.bind((host, port))
+            return port
+        except OSError:
+            continue
+    raise SystemExit(f"No free port in {start}-{start + 99}")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="DrumLab -- local drum transcription GUI")
-    ap.add_argument("--port", type=int, default=8765)
+    ap.add_argument("--port", type=int, default=None,
+                    help="Port to bind (default: first free port from 8765)")
     ap.add_argument("--host", default="127.0.0.1",
                     help="Address to bind (default 127.0.0.1; 0.0.0.0 exposes it on your LAN)")
     ap.add_argument("--no-browser", action="store_true")
@@ -1267,6 +1282,9 @@ def main() -> None:
 
     if args.preload:
         sys.exit(preload_models())
+
+    if args.port is None:
+        args.port = _first_free_port(args.host, 8765)
 
     for root in args.library:
         try:
