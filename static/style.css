@@ -366,6 +366,7 @@ button:disabled { opacity: 0.4; cursor: default; }
   background: var(--panel2); color: var(--dim); border: 1px solid var(--line);
 }
 .q-mini:not(:disabled):hover { border-color: var(--accent); color: var(--accent); }
+.q-mini.active { background: var(--accent); border-color: var(--accent); color: #0d1117; }
 .q-mini:disabled { opacity: 0.4; cursor: default; }
 .q-mini svg { display: block; }  /* center the folder icon like the × glyph, no baseline gap */
 #queue-list {

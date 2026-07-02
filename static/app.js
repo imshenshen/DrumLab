@@ -926,6 +926,8 @@ function updateLoopOverlays() {
 // override = hand fine-tune, null = follow the song). Feeds `master` directly,
 // bypassing mute/solo — the click should survive any mixer state.
 const metro = { on: false, bpm: null, beats: 4, offset: 0, eventId: null, schedBpm: null };
+// two-note tempo pick: null = idle, otherwise { picks: [t, ...] } while collecting.
+let metroPick = null;
 const metroGain = new Tone.Gain(0.7).connect(master);
 const metroSynth = new Tone.Synth({
   oscillator: { type: "sine" },
@@ -976,6 +978,180 @@ function metroTempoChanged() {
   else renderMetro();
 }
 
+/* ---- two-note tempo/phase pick -------------------------------------- */
+// All MIDI hit times across every lane, merged + sorted — the pool the pick
+// snaps to and the drift lock fits against.
+function allNoteTimes() {
+  if (!roll.events) return [];
+  const out = [];
+  for (const cls in roll.events) for (const t of roll.events[cls]) out.push(t);
+  out.sort((a, b) => a - b);
+  return out;
+}
+
+// Nearest actual hit to a raw content time, within `tol` seconds — so a pick
+// lands on a real transient, not wherever the cursor happened to fall.
+function nearestNoteTime(t, tol) {
+  const arr = allNoteTimes();
+  if (!arr.length) return null;
+  let j = lowerBound(arr, t), best = null, bestD = Infinity;
+  for (const k of [j - 1, j]) {
+    if (k < 0 || k >= arr.length) continue;
+    const d = Math.abs(arr[k] - t);
+    if (d < bestD) { bestD = d; best = arr[k]; }
+  }
+  return bestD <= tol ? best : null;
+}
+
+// Given a starting period + offset, iterate the drift lock: keep only notes
+// within a tight window of a predicted gridline, least-squares refit period +
+// phase to that inlier set, repeat. Returns { period, offset, inliers }.
+const METRO_TOL_FRAC = 0.12;                           // ± of a beat that counts as on-grid
+function refineMetroGrid(notes, period, offset) {
+  let inliers = 0;
+  for (let pass = 0; pass < 3; pass++) {
+    const tol = period * METRO_TOL_FRAC;
+    let n = 0, sx = 0, sy = 0, sxx = 0, sxy = 0;        // fit t = period*idx + offset
+    for (const t of notes) {
+      const idxF = (t - offset) / period;
+      const idx = Math.round(idxF);
+      if (Math.abs(idxF - idx) * period > tol) continue; // off the grid → drop
+      n++; sx += idx; sy += t; sxx += idx * idx; sxy += idx * t;
+    }
+    inliers = n;
+    if (n < 2) break;
+    const det = n * sxx - sx * sx;
+    if (Math.abs(det) <= 1e-9) break;
+    const p = (n * sxy - sx * sy) / det;
+    const o = (sy - p * sx) / n;
+    if (p <= 0.05) break;                                // insane period, stop
+    period = p; offset = o;
+  }
+  return { period, offset, inliers };
+}
+
+// Fit a beat grid to two picked hits, then refine against every note that
+// already sits on that grid (the drift lock). Returns { bpm, offset, inliers,
+// total, unlocked }.
+//
+// Two picks give a spacing but not how many beats span it, so we try a spread
+// of whole-beat counts and refine each into the notes. Choosing the fit with
+// the MOST inliers would octave-error badly: a grid at a sub-multiple of the
+// real beat (1/4 the BPM) still catches every note when a hihat runs
+// sixteenths, and an eighth-note grid (2x the BPM) fits even MORE — so raw
+// inlier count picks the wrong octave in both directions.
+//
+// In practice there is always a trusted tempo when picking: notes only exist
+// after the transcription, which also sets the detected tempo (metroBpm()).
+// The detected BEAT count is reliable; the picks refine its phase + fine value
+// ([[drumlab-tempo-detection]]). So the beat count spanning the picks is
+// resolved by whichever whole number lands the refined tempo CLOSEST to the
+// trusted one, in ratio space (octave-symmetric) — a 4x-slow or 2x-fast grid
+// is far off and loses. Only if there is genuinely no ref do we fall back to
+// the beat count the pick spacing itself implies. Inlier count is a tie-break
+// only. The refine keeps ONLY on-grid notes and least-squares fits period +
+// phase to them, so stray hits can't drag the tempo.
+function fitMetroFromPicks(tA, tB) {
+  const lo = Math.min(tA, tB), hi = Math.max(tA, tB), span = hi - lo;
+  if (span < 0.05) return null;                         // same note twice
+  const notes = allNoteTimes();
+  const total = notes.length;
+  const ref = metroBpm();                               // tempo we already trust
+  const guess = ref ? Math.max(1, Math.round(span / (60 / ref))) : 1;
+
+  // candidate beat-counts spanning the two picks: the guess and its neighbours,
+  // plus small counts in case there is no usable ref.
+  const cands = new Set([1, 2, 3, 4]);
+  for (let k = guess - 2; k <= guess + 2; k++) if (k >= 1) cands.add(k);
+
+  const fits = [];
+  for (const beats of cands) {
+    const period = span / beats;
+    const bpm = 60 / period;
+    if (bpm < 20 || bpm > 400) continue;
+    const r = refineMetroGrid(notes, period, lo);
+    const rb = 60 / r.period;
+    if (rb < 20 || rb > 400 || r.inliers < 2) continue;
+    fits.push({ period: r.period, offset: r.offset, inliers: r.inliers, bpm: rb });
+  }
+  if (!fits.length) return null;
+
+  let best;
+  if (ref) {
+    // closest refined tempo to the trusted one (log-ratio = octave-symmetric);
+    // inliers break near-ties
+    const cost = (f) => Math.abs(Math.log(f.bpm / ref));
+    best = fits.reduce((a, b) =>
+      cost(b) < cost(a) - 1e-6 || (Math.abs(cost(b) - cost(a)) <= 1e-6 && b.inliers > a.inliers) ? b : a);
+  } else {
+    // no trusted tempo: honour the beat count the pick spacing implies rather
+    // than chasing the finest densely-populated subdivision
+    best = fits.reduce((a, b) =>
+      Math.abs(60 / b.period - 60 / (span / guess)) < Math.abs(60 / a.period - 60 / (span / guess)) ? b : a);
+  }
+
+  // Lock quality. The two picks are the ground truth — you deliberately clicked
+  // two real hits a known number of beats apart, so the tempo/phase they define
+  // is trusted; the refine just averages out their onset jitter using the other
+  // notes on the same grid. So "unlocked" means only the DEGENERATE cases: too
+  // few notes sit on the grid to refine against, or the fit fell out of a sane
+  // tempo range. It deliberately does NOT try to prove the track is "musical" —
+  // measured against real transcriptions, on-grid FRACTION and residual spread
+  // can't tell music from random onsets once note density is high (the ±TOL
+  // window is nearly always occupied either way), so those gates only ever
+  // punished ordinary sparse and busy tracks. A real track — sparse or dense —
+  // yields many inliers spanning the song; genuine degeneracy (a handful of
+  // scattered solo hits) yields only 1–3.
+  const unlocked = best.inliers < 4 || best.bpm < 20 || best.bpm > 400;
+  return { bpm: best.bpm, offset: best.offset, inliers: best.inliers, total, unlocked };
+}
+
+function startMetroPick() {
+  if (!roll.events || !allNoteTimes().length) {
+    setLog("No notes to pick from — run the transcription first", true);
+    return;
+  }
+  metroPick = { picks: [] };
+  $("metro-pick").classList.add("active");
+  setLog("Tap tempo: click two notes on the roll a known number of beats apart (two upbeats work well)");
+}
+
+function cancelMetroPick() {
+  metroPick = null;
+  $("metro-pick").classList.remove("active");
+}
+
+// A roll click while a pick is armed. Returns true if it consumed the click.
+function metroPickClick(x) {
+  if (!metroPick) return false;
+  const t = (roll.scrollPx + x) / engine.pxPerSec;
+  const snapped = nearestNoteTime(t, 12 / engine.pxPerSec);
+  if (snapped === null) { setLog("No note there — click directly on a hit", true); return true; }
+  metroPick.picks.push(snapped);
+  if (metroPick.picks.length < 2) {
+    setLog("Got the first note at " + snapped.toFixed(3) + " s — now click the second");
+    return true;
+  }
+  const [a, b] = metroPick.picks;
+  cancelMetroPick();
+  const fit = fitMetroFromPicks(a, b);
+  if (!fit) { setLog("Couldn't read a tempo from those two notes — pick two clearer hits", true); return true; }
+  if (fit.unlocked) {
+    // Grid never locked onto the song's notes — say so and stop trying. Leave
+    // the existing tempo/offset alone rather than committing a bad guess.
+    setLog("Metronome grid unlocked — only " + fit.inliers + " of " + fit.total +
+           " notes fell on that grid, so the tempo wasn't trusted. Existing click unchanged.", true);
+    return true;
+  }
+  metro.bpm = Math.round(fit.bpm * 10) / 10;
+  metro.offset = Math.round(fit.offset * 1000) / 1000;
+  if (!metro.on) { metro.on = true; ensureAudio(); }
+  rescheduleMetro();
+  setLog("Metronome locked to " + metro.bpm.toFixed(1) + " BPM from the notes (" +
+         fit.inliers + "/" + fit.total + " on grid), beat 1 at " + metro.offset.toFixed(3) + " s");
+  return true;
+}
+
 $("metro-toggle").addEventListener("click", async () => {
   metro.on = !metro.on;
   if (metro.on) {
@@ -1003,6 +1179,7 @@ $("metro-offset").addEventListener("change", () => {
   rescheduleMetro();
 });
 $("metro-mark").addEventListener("click", () => { metro.offset = Math.round(nowContent() * 100) / 100; rescheduleMetro(); });
+$("metro-pick").addEventListener("click", () => { if (metroPick) cancelMetroPick(); else startMetroPick(); });
 $("metro-vol").addEventListener("input", () => { metroGain.gain.value = parseFloat($("metro-vol").value); });
 
 /* ------------------------------------------------------------------ */
@@ -1217,6 +1394,7 @@ $("roll-wrap").addEventListener("pointerup", (e) => {
     setLoop(tA, tB);
     return;
   }
+  if (metroPickClick(e.offsetX)) return;
   if (editMode) toggleNote(e.offsetX, e.offsetY);
   else seekAll((roll.scrollPx + e.offsetX) / engine.pxPerSec);
 });
@@ -2291,6 +2469,7 @@ async function poll(fast) {
       engine.tempo = null;   // stale until the new song's transcription arrives
       metro.bpm = null;      // drop the hand-tune; re-lock onto the new song's tempo
       metro.offset = 0;
+      if (metroPick) cancelMetroPick();
       rescheduleMetro();
       // The transport keeps running while the new file decodes, so by the time the lane
       // renders the needle has crept forward (and the new song starts mid-way). Pin it

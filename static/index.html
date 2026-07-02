@@ -88,6 +88,10 @@
           <input type="number" id="metro-offset" step="0.01" value="0">
           <button id="metro-mark" class="q-mini" title="Place beat 1 at the current playhead — pause on a downbeat first">@ playhead</button>
         </div>
+        <div class="metro-row" title="Set the tempo and beat 1 from the MIDI notes — click, then click two hits on the roll a whole number of beats apart (two upbeats work well). Locks to the notes that sit on that grid; if too few do, it says so in the footer and leaves the click alone.">
+          <span class="metro-lab">From notes</span>
+          <button id="metro-pick" class="q-mini" title="Arm two-note tempo pick, then click two hits on the roll">Set from 2 notes</button>
+        </div>
         <div class="metro-row" title="Click volume">
           <span class="metro-lab">Volume</span>
           <input type="range" id="metro-vol" min="0" max="1" step="0.01" value="0.7">
