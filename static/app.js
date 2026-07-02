@@ -781,10 +781,12 @@ function seekAll(c) {
 }
 
 // A speed change needs a one-time server render of the stretched audio (cached
-// after). We debounce the knob so a sweep triggers one render, and — while playing
-// — keep the current speed audible until the new chunks are ready, then swap at the
-// live playhead so there's no silent gap.
-let _speedTimer = null, _speedTarget = null;
+// after; rubberband takes ~10 s on a full song, so the wait is real on the first
+// hit of a speed). We debounce the knob so a sweep triggers one render, and —
+// while playing — pause the transport for the render so the clock can't run ahead
+// of audio that isn't ready, then resume at the same spot once the playhead chunk
+// is decoded.
+let _speedTimer = null, _speedTarget = null, _speedPaused = false;
 function setSpeedDebounced(s) {
   _speedTarget = s;
   if (_speedTimer) clearTimeout(_speedTimer);
@@ -792,22 +794,41 @@ function setSpeedDebounced(s) {
 }
 
 function setSpeed(s) {
+  const resume = (c) => {
+    _speedPaused = false;
+    // transport before audio (see togglePlay): pump() needs state "started"
+    Tone.Transport.start();
+    startAudio(c);
+    renderPlayButton();
+  };
   const commit = () => {
-    if (_speedTarget !== s) return;   // superseded by a newer target
+    if (_speedTarget !== s) return;   // superseded; the newer target's commit resumes
+    const paused = _speedPaused; _speedPaused = false;
     const c = nowContent();
     engine.speed = s;
     Tone.Transport.seconds = c / s;
     rebuildPart(roll.events || {});
     if (loop.active) { try { Tone.Transport.setLoopPoints(loop.start / s, loop.end / s); } catch (e) {} }
     updateCursors(c);
-    if (Tone.Transport.state === "started") { stopAudio(); startAudio(c); }
+    setLog("Speed " + s.toFixed(2) + "×");
+    if (Tone.Transport.state === "started") { stopAudio(); startAudio(c); }  // user resumed by hand mid-render
+    else if (paused) resume(c);
     else for (const lane of laneList()) lane.sched.prefetch(s, c);
   };
-  if (Math.abs(s - engine.speed) < 1e-4) return;
+  if (Math.abs(s - engine.speed) < 1e-4) {
+    // knob came back to the current speed — nothing to render, just resume if we paused
+    if (_speedPaused) {
+      _speedPaused = false;
+      if (Tone.Transport.state !== "started") resume(nowContent());
+      setLog("Speed " + s.toFixed(2) + "×");
+    }
+    return;
+  }
   if (Tone.Transport.state === "started" && laneList().length) {
-    // pre-render the stretched audio at the playhead before swapping (no gap)
-    const cur = Math.max(0, Math.floor(nowContent() / CHUNK_SEC));
+    Tone.Transport.pause(); stopAudio(); _speedPaused = true;
+    renderPlayButton();
     if (s !== 1.0) setLog("Rendering " + s.toFixed(2) + "× audio …");
+    const cur = Math.max(0, Math.floor(nowContent() / CHUNK_SEC));
     Promise.all(laneList().map((l) => l.sched.fetch(s, cur))).then(commit).catch(commit);
   } else commit();
 }

@@ -33,7 +33,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-APP_VERSION = "5.4"
+APP_VERSION = "5.5"
 APP_DIR = Path(__file__).resolve().parent
 WORK = APP_DIR / "workdir"
 UPLOADS = WORK / "uploads"
@@ -944,9 +944,9 @@ def get_audio(which: str, parts: Optional[str] = None):
 
 # Chunked, pitch-preserved playback streaming. The client plays audio as a window
 # of short chunks scheduled on the Web Audio clock, so RAM is bounded by the window
-# (not the song length) and stays sample-aligned with the MIDI. Speed changes reuse
-# the export's atempo: one continuous whole-file stretch (no per-chunk seams), cached,
-# then sliced on demand. Slicing a PCM WAV with input-seek is sample-accurate.
+# (not the song length) and stays sample-aligned with the MIDI. Speed changes render
+# one continuous whole-file stretch (no per-chunk seams), cached, then sliced on
+# demand. Slicing a PCM WAV with input-seek is sample-accurate.
 CHUNKS = WORK / "chunks"
 CHUNKS.mkdir(parents=True, exist_ok=True)
 CHUNK_SEC = 8.0                       # content seconds per chunk (must match app.js)
@@ -954,6 +954,33 @@ _STRETCH_GUARD = threading.Lock()
 _STRETCH_LOCKS: dict = {}             # cache path -> per-file lock (one render at a time)
 # render stretches below normal priority so they never starve demucs/adtof inference
 _LOW_PRIO = subprocess.CREATE_NO_WINDOW | getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0)
+_HAVE_RB: Optional[bool] = None
+
+
+def _have_rubberband() -> bool:
+    """Whether this ffmpeg build carries librubberband (probed once)."""
+    global _HAVE_RB
+    if _HAVE_RB is None:
+        r = subprocess.run(["ffmpeg", "-hide_banner", "-filters"], capture_output=True,
+                           creationflags=subprocess.CREATE_NO_WINDOW, timeout=30)
+        _HAVE_RB = b" rubberband " in r.stdout
+    return _HAVE_RB
+
+
+def _stretch_args(speed: float) -> list:
+    """Pitch-preserving time-stretch filter args. rubberband (phase vocoder with
+    transient preservation) is much smoother than atempo's WSOLA, especially on
+    sustained content at low speeds, at the cost of a slower render (~30x realtime
+    vs near-instant); atempo is the fallback for ffmpeg builds without it."""
+    if _have_rubberband():
+        return ["-filter:a", f"rubberband=tempo={speed:.4f}"]
+    return ["-filter:a", f"atempo={speed:.4f}"]
+
+
+def _stretch_tag() -> str:
+    """Cache-name tag for the active stretch filter, so a build change (or fallback)
+    can't serve files rendered by the other algorithm."""
+    return "rb" if _have_rubberband() else ""
 
 
 def _lane_source(lane: str, parts: Optional[str] = None):
@@ -970,7 +997,8 @@ def _lane_source(lane: str, parts: Optional[str] = None):
 
 def _evict_stretch_cache(keep_bytes: int = 1_500_000_000):
     """LRU-cap the whole-file stretched WAVs (they are large)."""
-    files = sorted(CHUNKS.glob("*x.wav"), key=lambda p: p.stat().st_mtime)
+    files = sorted([*CHUNKS.glob("*x.wav"), *CHUNKS.glob("*xrb.wav")],
+                   key=lambda p: p.stat().st_mtime)
     total = sum(p.stat().st_size for p in files)
     while total > keep_bytes and len(files) > 1:
         victim = files.pop(0)
@@ -979,8 +1007,8 @@ def _evict_stretch_cache(keep_bytes: int = 1_500_000_000):
 
 
 def _ensure_stretched(src: str, key: str, speed: float) -> Path:
-    """Path to a whole-file atempo-stretched WAV for (lane, speed), rendered once."""
-    cached = CHUNKS / f"{key}_{speed:.4f}x.wav"
+    """Path to a whole-file time-stretched WAV for (lane, speed), rendered once."""
+    cached = CHUNKS / f"{key}_{speed:.4f}x{_stretch_tag()}.wav"
     if cached.exists():
         os.utime(cached, None)        # mark recently used for LRU
         return cached
@@ -991,8 +1019,8 @@ def _ensure_stretched(src: str, key: str, speed: float) -> Path:
             return cached
         tmp = cached.with_suffix(".tmp.wav")
         r = subprocess.run(
-            ["ffmpeg", "-y", "-i", str(src), "-filter:a", f"atempo={speed:.4f}",
-             "-c:a", "pcm_s16le", str(tmp)],
+            ["ffmpeg", "-y", "-i", str(src)] + _stretch_args(speed)
+            + ["-c:a", "pcm_s16le", str(tmp)],
             capture_output=True, creationflags=_LOW_PRIO, timeout=600)
         if r.returncode != 0 or not tmp.exists():
             tmp.unlink(missing_ok=True)
@@ -1101,10 +1129,10 @@ def _render_stem(which: str, fmt: str, speed: float, parts: Optional[str]) -> tu
     nice = out_name(f"_{which}{tag}{stag}.{ext}")
     if fmt == "wav" and not stretch:
         return Path(src), nice, mime
-    cached = OUT / f"{skey}_{fmt}{stag}.{ext}"
+    cached = OUT / f"{skey}_{fmt}{stag}{_stretch_tag() if stretch else ''}.{ext}"
     if not cached.exists():
-        # atempo time-stretches with pitch preserved; matches the Speed-knob playback
-        filt = ["-filter:a", f"atempo={speed:.4f}"] if stretch else []
+        # time-stretches with pitch preserved; matches the Speed-knob playback
+        filt = _stretch_args(speed) if stretch else []
         r = subprocess.run(
             ["ffmpeg", "-y", "-i", src] + filt + args + [str(cached)],
             capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW, timeout=600,
