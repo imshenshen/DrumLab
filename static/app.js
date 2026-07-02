@@ -557,15 +557,17 @@ const CHUNK_BEHIND = 1;   // chunks kept cached behind it
 const SCHED_TICK_MS = 120;
 
 // Fire the synth this many wall-seconds EARLY so its audible attack lands on the beat.
-// MEASURED (Tone.Offline render of the real voices): every voice fires within ~1 ms of
-// its trigger, amplitude-peaking ~3-5 ms later (kick/snare/hihat/tom); the ride cymbal is
-// a slow swell (~15 ms) by design. So the true attack is only a few ms -- this lead is
-// small on purpose. It is wall-fixed (never scaled by speed) so the feel holds at every
-// rate, and kept OUT of the picked onset times (app.py ONSET_COMP_SEC), which mark the
-// true transient for the markers + MIDI export. With ONSET_COMP_SEC=0 there is no
-// content-time term at all, so there is no speed-dependent drift.
-// (A large lead here -- 0.07-0.09 was tried -- flams the synth well ahead of the real
-// drum stem: it was built on a wrong "kick attack is ~70 ms" assumption, since disproved.)
+// Wall-time lead that makes transport-scheduled sounds land ON the audible beat.
+// MEASURED (recorded master output, lane hits vs transport-grid events): the lane audio
+// plays ~context.lookAhead (0.1 s) EARLY relative to the transport timeline, because the
+// chunk scheduler pairs raw ctx.currentTime with Tone.Transport.seconds -- and that getter
+// reports the position at now() = currentTime + lookAhead. The synth voices themselves
+// fire within ~1 ms of their trigger (Tone.Offline render), so this lead exists to meet
+// the early audio, not to cover any synth attack. The metronome click shares it for the
+// same reason. It is wall-fixed (never scaled by speed) so the feel holds at every rate,
+// and kept OUT of the picked onset times (app.py ONSET_COMP_SEC), which mark the true
+// transient for the markers + MIDI export. With ONSET_COMP_SEC=0 there is no content-time
+// term at all, so there is no speed-dependent drift.
 // TWEAK ME by ear: raise if the synth trails the track, lower if it anticipates.
 const SYNTH_LEAD_SEC = 0.09;
 
@@ -808,6 +810,7 @@ function setSpeed(s) {
     engine.speed = s;
     Tone.Transport.seconds = c / s;
     rebuildPart(roll.events || {});
+    rescheduleMetro();   // the click interval is in transport (wall) seconds = beat / speed
     if (loop.active) { try { Tone.Transport.setLoopPoints(loop.start / s, loop.end / s); } catch (e) {} }
     updateCursors(c);
     setLog("Speed " + s.toFixed(2) + "×");
@@ -915,6 +918,430 @@ function updateLoopOverlays() {
     ov.style.width = Math.abs(x1 - x0) + "px";
   }
 }
+
+/* ------------------------------------------------------------------ */
+/* metronome                                                           */
+/* ------------------------------------------------------------------ */
+// Click track scheduled on the transport, locked to the detected tempo (bpm
+// override = hand fine-tune, null = follow the song). Feeds `master` directly,
+// bypassing mute/solo — the click should survive any mixer state.
+// bpm: null = auto (follow the fitted grid below), else a hand/pick tune.
+// auto: cached { bpm, offset } fitted onto the transcribed hits, or null if the
+// fit was degenerate (then auto mode falls back to the raw detected tempo).
+// offset: null = follow the fitted/detected beat-1; a number = hand-set beat-1
+// (offset input or "@ playhead" mark), which wins in either mode.
+const metro = { on: false, bpm: null, auto: null, beats: 4, offset: null, eventId: null, schedBpm: null, schedOff: null };
+// two-note tempo pick: null = idle, otherwise { picks: [t, ...] } while collecting.
+let metroPick = null;
+const metroGain = new Tone.Gain(0.7).connect(master);
+const metroSynth = new Tone.Synth({
+  oscillator: { type: "sine" },
+  envelope: { attack: 0.001, decay: 0.05, sustain: 0, release: 0.03 },
+}).connect(metroGain);
+
+// Effective BPM: a hand/pick tune wins; otherwise the grid fitted onto the
+// notes; the raw detected tempo only as a last resort when the fit was degenerate.
+function metroBpm() { return metro.bpm || (metro.auto && metro.auto.bpm) || engine.tempo || null; }
+// Effective beat-1 offset: a hand-set offset (input / "@ playhead") always wins;
+// otherwise the fitted grid's phase in auto mode, else 0.
+function metroOffset() {
+  if (metro.offset != null) return metro.offset;
+  return metro.bpm === null && metro.auto ? metro.auto.offset : 0;
+}
+
+function renderMetro() {
+  const bpm = metroBpm();
+  $("metro-toggle").classList.toggle("on", metro.on);
+  $("metro-readout").textContent = (bpm ? bpm.toFixed(1) : "--") + " · " + metro.beats + "/4";
+  $("metro-auto").disabled = metro.bpm === null;
+  const bpmEl = $("metro-bpm");
+  if (document.activeElement !== bpmEl) bpmEl.value = bpm ? bpm.toFixed(1) : "";
+  const offEl = $("metro-offset");
+  if (document.activeElement !== offEl) offEl.value = String(Math.round(metroOffset() * 100) / 100);
+}
+
+function rescheduleMetro() {
+  if (metro.eventId !== null) { try { Tone.Transport.clear(metro.eventId); } catch (e) {} metro.eventId = null; }
+  metro.schedBpm = null; metro.schedOff = null;
+  const bpm = metroBpm();
+  if (metro.on && bpm) {
+    const beatSec = 60 / bpm;                                  // content seconds per beat
+    const interval = beatSec / engine.speed;                   // transport (wall) seconds
+    const off = metroOffset();
+    metro.schedBpm = bpm; metro.schedOff = off;
+    const phase = ((off % beatSec) + beatSec) % beatSec;
+    // The lane audio sounds SYNTH_LEAD_SEC-ish early vs the transport timeline (see the
+    // constant), so the click carries the same wall lead — baked into the schedule, NOT
+    // subtracted at fire time (that eats the lookAhead margin; see rebuildPart). Trigger
+    // at the callback's own `time`, which Tone guarantees is ~lookAhead in the future.
+    let start = phase / engine.speed - SYNTH_LEAD_SEC;
+    while (start < 0) start += interval;
+    metro.eventId = Tone.Transport.scheduleRepeat((time) => {
+      const c = (Tone.Transport.getSecondsAtTime(time) + SYNTH_LEAD_SEC) * engine.speed;
+      const idx = Math.round((c - off) / beatSec);
+      const accent = metro.beats > 1 && ((idx % metro.beats) + metro.beats) % metro.beats === 0;
+      try { metroSynth.triggerAttackRelease(accent ? 1760 : 1175, 0.05, time, accent ? 1.0 : 0.6); } catch (e) {}
+    }, interval, start);
+  }
+  renderMetro();
+}
+
+// The song's notes/tempo changed (new transcription, new song, threshold edit).
+// Re-fit the auto grid onto the current hits so auto mode locks to the notes —
+// not the raw detected BPM — then re-lock the click unless it's hand-tuned.
+function metroTempoChanged() {
+  metro.auto = autoFitMetro();
+  if (metro.on && metro.bpm === null && (metro.schedBpm !== metroBpm() || metro.schedOff !== metroOffset())) rescheduleMetro();
+  else renderMetro();
+}
+
+/* ---- two-note tempo/phase pick -------------------------------------- */
+// All MIDI hit times across every lane, merged + sorted — the pool the pick
+// snaps to and the drift lock fits against.
+function allNoteTimes() {
+  if (!roll.events) return [];
+  const out = [];
+  for (const cls in roll.events) for (const t of roll.events[cls]) out.push(t);
+  out.sort((a, b) => a - b);
+  return out;
+}
+
+// Nearest actual hit to a raw content time, within `tol` seconds — so a pick
+// lands on a real transient, not wherever the cursor happened to fall.
+function nearestNoteTime(t, tol) {
+  const arr = allNoteTimes();
+  if (!arr.length) return null;
+  let j = lowerBound(arr, t), best = null, bestD = Infinity;
+  for (const k of [j - 1, j]) {
+    if (k < 0 || k >= arr.length) continue;
+    const d = Math.abs(arr[k] - t);
+    if (d < bestD) { bestD = d; best = arr[k]; }
+  }
+  return bestD <= tol ? best : null;
+}
+
+// Given a starting period + offset, iterate the drift lock: keep only notes
+// within a tight window of a predicted gridline, least-squares refit period +
+// phase to that inlier set, repeat. Returns { period, offset, inliers, rms }
+// where rms is the RMS on-grid residual as a fraction of the period (0 = every
+// inlier dead on a beat line; the tighter, the more the grid really is the
+// track's pulse rather than a window that happens to catch scattered hits).
+const METRO_TOL_FRAC = 0.12;                           // ± of a beat that counts as on-grid
+function refineMetroGrid(notes, period, offset) {
+  let inliers = 0, rms = 1, coverage = 0;
+  for (let pass = 0; pass < 3; pass++) {
+    const tol = period * METRO_TOL_FRAC;
+    let n = 0, sx = 0, sy = 0, sxx = 0, sxy = 0, sr2 = 0; // fit t = period*idx + offset
+    let minIdx = Infinity, maxIdx = -Infinity; const slots = new Set();
+    for (const t of notes) {
+      const idxF = (t - offset) / period;
+      const idx = Math.round(idxF);
+      const resid = (idxF - idx) * period;
+      if (Math.abs(resid) > tol) continue;              // off the grid → drop
+      n++; sx += idx; sy += t; sxx += idx * idx; sxy += idx * t; sr2 += resid * resid;
+      slots.add(idx); if (idx < minIdx) minIdx = idx; if (idx > maxIdx) maxIdx = idx;
+    }
+    inliers = n;
+    rms = n ? Math.sqrt(sr2 / n) / period : 1;
+    // fraction of beat slots between the first and last on-grid hit that are
+    // actually occupied — a real pulse fills nearly every beat it spans; hits
+    // that merely fell near a random grid leave big gaps
+    coverage = n >= 2 ? slots.size / (maxIdx - minIdx + 1) : 0;
+    if (n < 2) break;
+    const det = n * sxx - sx * sx;
+    if (Math.abs(det) <= 1e-9) break;
+    const p = (n * sxy - sx * sy) / det;
+    const o = (sy - p * sx) / n;
+    if (p <= 0.05) break;                                // insane period, stop
+    period = p; offset = o;
+  }
+  return { period, offset, inliers, rms, coverage };
+}
+
+// Fit a beat grid to two picked hits, then refine against every note that
+// already sits on that grid (the drift lock). Returns { bpm, offset, inliers,
+// total, unlocked }.
+//
+// Two picks give a spacing but not how many beats span it, so we try a spread
+// of whole-beat counts and refine each into the notes. Choosing the fit with
+// the MOST inliers would octave-error badly: a grid at a sub-multiple of the
+// real beat (1/4 the BPM) still catches every note when a hihat runs
+// sixteenths, and an eighth-note grid (2x the BPM) fits even MORE — so raw
+// inlier count picks the wrong octave in both directions.
+//
+// In practice there is always a trusted tempo when picking: notes only exist
+// after the transcription, which also sets the detected tempo (metroBpm()).
+// The detected BEAT count is reliable; the picks refine its phase + fine value
+// ([[drumlab-tempo-detection]]). So the beat count spanning the picks is
+// resolved by whichever whole number lands the refined tempo CLOSEST to the
+// trusted one, in ratio space (octave-symmetric) — a 4x-slow or 2x-fast grid
+// is far off and loses. Only if there is genuinely no ref do we fall back to
+// the beat count the pick spacing itself implies. Inlier count is a tie-break
+// only. The refine keeps ONLY on-grid notes and least-squares fits period +
+// phase to them, so stray hits can't drag the tempo.
+function fitMetroFromPicks(tA, tB) {
+  const lo = Math.min(tA, tB), hi = Math.max(tA, tB), span = hi - lo;
+  if (span < 0.05) return null;                         // same note twice
+  const notes = allNoteTimes();
+  const total = notes.length;
+  const ref = metroBpm();                               // tempo we already trust
+  const guess = ref ? Math.max(1, Math.round(span / (60 / ref))) : 1;
+
+  // candidate beat-counts spanning the two picks: the guess and its neighbours,
+  // plus small counts in case there is no usable ref.
+  const cands = new Set([1, 2, 3, 4]);
+  for (let k = guess - 2; k <= guess + 2; k++) if (k >= 1) cands.add(k);
+
+  const fits = [];
+  for (const beats of cands) {
+    const period = span / beats;
+    const bpm = 60 / period;
+    if (bpm < 20 || bpm > 999) continue;
+    const r = refineMetroGrid(notes, period, lo);
+    const rb = 60 / r.period;
+    if (rb < 20 || rb > 999 || r.inliers < 2) continue;
+    fits.push({ period: r.period, offset: r.offset, inliers: r.inliers, bpm: rb });
+  }
+  if (!fits.length) return null;
+
+  let best;
+  if (ref) {
+    // closest refined tempo to the trusted one (log-ratio = octave-symmetric);
+    // inliers break near-ties
+    const cost = (f) => Math.abs(Math.log(f.bpm / ref));
+    best = fits.reduce((a, b) =>
+      cost(b) < cost(a) - 1e-6 || (Math.abs(cost(b) - cost(a)) <= 1e-6 && b.inliers > a.inliers) ? b : a);
+  } else {
+    // no trusted tempo: honour the beat count the pick spacing implies rather
+    // than chasing the finest densely-populated subdivision
+    best = fits.reduce((a, b) =>
+      Math.abs(60 / b.period - 60 / (span / guess)) < Math.abs(60 / a.period - 60 / (span / guess)) ? b : a);
+  }
+
+  // Lock quality. The two picks are the ground truth — you deliberately clicked
+  // two real hits a known number of beats apart, so the tempo/phase they define
+  // is trusted; the refine just averages out their onset jitter using the other
+  // notes on the same grid. So "unlocked" means only the DEGENERATE cases: too
+  // few notes sit on the grid to refine against, or the fit fell out of a sane
+  // tempo range. It deliberately does NOT try to prove the track is "musical" —
+  // measured against real transcriptions, on-grid FRACTION and residual spread
+  // can't tell music from random onsets once note density is high (the ±TOL
+  // window is nearly always occupied either way), so those gates only ever
+  // punished ordinary sparse and busy tracks. A real track — sparse or dense —
+  // yields many inliers spanning the song; genuine degeneracy (a handful of
+  // scattered solo hits) yields only 1–3.
+  const unlocked = best.inliers < 4 || best.bpm < 20 || best.bpm > 999;
+  return { bpm: best.bpm, offset: best.offset, inliers: best.inliers, total, unlocked };
+}
+
+// Auto-lock the click onto the transcribed hits, with no clicking. The detected
+// tempo (engine.tempo, from the audio) is the SEED. librosa's global BPM is
+// quantized 1-3 BPM off and, being audio-derived, never actually sits on the
+// MIDI notes, so on its own the click drifts in and out of phase over a song —
+// but its OCTAVE (quarter-note pulse vs half/double) is reliable. So we trust
+// the octave and search only the fine value + phase for the grid the notes
+// really lie on:
+//
+//   • period: the seed swept ±10% in fine steps, so a seed a couple BPM off
+//     still snaps onto the true pulse. We deliberately do NOT try half/double —
+//     with fully-populated subdivisions (a 16th-note hihat) an 8th- or 16th-grid
+//     fits just as tightly, so nothing in the notes alone disambiguates the
+//     octave; the seed does. A genuinely octave-wrong detection is what the
+//     manual two-note pick ([[drumlab-metro-two-note-pick]]) is for.
+//   • phase: seeded from several early notes and least-squares-refined to the
+//     whole inlier set (refineMetroGrid), so the grid follows slow tempo wander
+//     rather than locking to one instant.
+//
+// Score = inliers × beat-coverage × grid-tightness. Lock only if the best fit
+// is actually good — enough notes on the grid, occupying most beats, sitting
+// tight on the lines — else return null and the caller falls back to the raw
+// detected BPM.
+function autoFitMetro() {
+  const seedBpm = engine.tempo;
+  const notes = allNoteTimes();
+  const total = notes.length;
+  if (!seedBpm || total < 8) return null;               // nothing to fit against
+  const seedPeriod = 60 / seedBpm;
+
+  // seed phases: the first handful of notes — one of them is almost always on a
+  // real beat, and refine pulls the rest of the grid onto the pulse from there.
+  const phaseSeeds = notes.slice(0, Math.min(8, total));
+
+  const fits = [];
+  // ±10% of the seed in fine 0.25% steps — enough to snap onto the true period
+  // from a couple-BPM-off seed while resolving sub-BPM (a coarse step leaves the
+  // grid a fraction of a BPM off and it drifts phase over a long song).
+  for (let f = -0.10; f <= 0.10 + 1e-9; f += 0.0025) {
+    const period = seedPeriod * (1 + f);
+    const bpm = 60 / period;
+    if (bpm < 20 || bpm > 999) continue;
+    for (const ph of phaseSeeds) {
+      const r = refineMetroGrid(notes, period, ph);
+      const rb = 60 / r.period;
+      if (rb < 20 || rb > 999 || r.inliers < 4) continue;
+      // stay in the seed's octave — the fine sweep can't wander to a half/double,
+      // but the least-squares refit could slide there over a dense subdivision;
+      // reject anything that drifted more than ~a semitone from the seed.
+      if (Math.abs(Math.log2(rb / seedBpm)) > 0.15) continue;
+      // reward a grid that fills its beats (coverage) with many hits (inliers),
+      // sharply favouring tightness — exp(-rms/τ) so the TRUE pulse (rms≈0.005)
+      // decisively beats a slightly-off period that catches different
+      // subdivision hits (rms≈0.03); a linear (1-rms) weight didn't separate them
+      // and let dense 16th-note tracks lock a few BPM off.
+      const score = r.inliers * r.coverage * Math.exp(-r.rms / 0.02);
+      fits.push({ bpm: rb, offset: r.offset, inliers: r.inliers, rms: r.rms, coverage: r.coverage, score });
+    }
+  }
+  if (!fits.length) return null;
+
+  const best = fits.reduce((a, b) => (b.score > a.score ? b : a));
+  // "Good enough" vs a random smear of onsets. Real quantized MIDI on the true
+  // pulse clears ALL THREE of these; noise that merely fell near a grid clears
+  // at most one. rms: real hits sit tight on the line (<0.03 of a beat), random
+  // ones smear toward the ±0.12 window edge. coverage: a real pulse occupies
+  // nearly every beat it spans, so few gaps; scattered noise leaves big holes.
+  // inliers: a floor so a handful of lucky hits can't lock. Tuned against 800
+  // random-onset sets (0 false locks) and 800 synthetic real grids across tempo,
+  // density, dropout and 16th-note fills (0 misses).
+  const good = best.inliers >= 8 && best.rms < 0.035 && best.coverage >= 0.55;
+  if (!good) return null;
+  const period = 60 / best.bpm;
+  return {
+    bpm: Math.round(best.bpm * 10) / 10,
+    // the fit nails the beat GRID, but its offset sits on an arbitrary beat of
+    // the bar — anchor it to the likeliest downbeat so the accent lands on 1
+    offset: Math.round(downbeatOffset(period, best.offset, metro.beats) * 1000) / 1000,
+    period, inliers: best.inliers, total,
+  };
+}
+
+// The fitted grid gives the pulse and phase but not WHICH beat is "1" — every
+// beat is an equally good gridline, so the accent could land on any of them.
+// Pick the downbeat (offset shifted by 0..beats-1 beats) that best matches how
+// drums normally sit in a bar: the kick anchors beat 1 (most) and the other
+// strong beats, the snare plays the backbeat. For each candidate downbeat we
+// bucket every kick/snare onset into its beat-of-bar and score
+//   kicks on strong beats (beat 1 weighted highest)  + snares on the backbeat
+//   − kicks on the backbeat
+// Beat 1 is weighted above the other strong beats, and the song's first onset
+// adds a small "songs start on a downbeat" tie-breaker — together they resolve
+// the otherwise-symmetric 1-vs-3 of a plain rock beat (kick 1&3, snare 2&4).
+// A truly symmetric groove that also doesn't start on 1 is genuinely ambiguous
+// from drums alone — that's what the manual "@ playhead" anchor is for. Falls
+// back to the unshifted offset when there's no kick/snare; beats<=1 has no bar.
+function downbeatOffset(period, offset, beats) {
+  if (beats <= 1) return offset;
+  const kick = (roll.events && roll.events.kick) || [];
+  const snare = (roll.events && roll.events.snare) || [];
+  if (!kick.length && !snare.length) return offset;
+  const tol = period * METRO_TOL_FRAC;
+  const beatOf = (t, s) => {                                  // beat-of-bar for shift s, or -1 off-grid
+    const idxF = (t - offset) / period;
+    const idx = Math.round(idxF);
+    if (Math.abs(idxF - idx) * period > tol) return -1;
+    return ((idx - s) % beats + beats) % beats;
+  };
+  const half = beats / 2;
+  const strongW = (b) => b === 0 ? 1.5 : (beats % 2 === 0 && b === half ? 1 : 0); // beat 1 > beat 3
+  const back = (b) => beats % 2 === 0 && (b === Math.floor(beats / 4) || b === Math.floor(beats / 4) + half);
+  // the very first on-grid onset of the song — songs usually start on a downbeat,
+  // so this breaks the otherwise-symmetric 1-vs-3 tie a plain rock beat (kick on
+  // 1&3, snare on 2&4) leaves. Small on purpose: it only decides genuine ties,
+  // never overrides a clear kick/snare majority (e.g. a song with a pickup).
+  const first = allNoteTimes().find((t) => beatOf(t, 0) >= 0);
+  let bestS = 0, bestScore = -Infinity;
+  for (let s = 0; s < beats; s++) {
+    let sc = 0;
+    for (const t of kick)  { const b = beatOf(t, s); if (b < 0) continue; sc += strongW(b) || (back(b) ? -1 : 0); }
+    for (const t of snare) { const b = beatOf(t, s); if (b < 0) continue; sc += back(b) ? 1 : 0; }
+    if (first != null && beatOf(first, s) === 0) sc += 0.5;  // song starts on beat 1 (tie-breaker only)
+    if (sc > bestScore) { bestScore = sc; bestS = s; }
+  }
+  return offset + bestS * period;
+}
+
+function startMetroPick() {
+  if (!roll.events || !allNoteTimes().length) {
+    setLog("Nothing to mark yet — run the transcription first", true);
+    return;
+  }
+  metroPick = { picks: [] };
+  $("metro-pick").classList.add("active");
+  setLog("Mark the tempo: click two points on the roll a whole number of beats apart (two downbeats a bar apart work well) — each click snaps to the nearest hit");
+}
+
+function cancelMetroPick() {
+  metroPick = null;
+  $("metro-pick").classList.remove("active");
+}
+
+// A roll click while a pick is armed. Returns true if it consumed the click.
+function metroPickClick(x) {
+  if (!metroPick) return false;
+  const t = (roll.scrollPx + x) / engine.pxPerSec;
+  const snapped = nearestNoteTime(t, 12 / engine.pxPerSec);
+  if (snapped === null) { setLog("No hit there — click directly on a hit", true); return true; }
+  metroPick.picks.push(snapped);
+  if (metroPick.picks.length < 2) {
+    setLog("Marked the first point at " + snapped.toFixed(3) + " s — now click the second, a whole number of beats later");
+    return true;
+  }
+  const [a, b] = metroPick.picks;
+  cancelMetroPick();
+  const fit = fitMetroFromPicks(a, b);
+  if (!fit) { setLog("Couldn't read a tempo from those two points — mark two clearer hits", true); return true; }
+  if (fit.unlocked) {
+    // Grid never locked onto the song's hits — say so and stop trying. Leave
+    // the existing tempo/offset alone rather than committing a bad guess.
+    setLog("Metronome grid unlocked — only " + fit.inliers + " of " + fit.total +
+           " hits fell on that grid, so the tempo wasn't trusted. Existing click unchanged.", true);
+    return true;
+  }
+  metro.bpm = Math.round(fit.bpm * 10) / 10;
+  metro.offset = Math.round(fit.offset * 1000) / 1000;
+  if (!metro.on) { metro.on = true; ensureAudio(); }
+  rescheduleMetro();
+  setLog("Metronome locked to " + metro.bpm.toFixed(1) + " BPM from your marks (" +
+         fit.inliers + "/" + fit.total + " hits on grid), beat 1 at " + metro.offset.toFixed(3) + " s");
+  return true;
+}
+
+$("metro-toggle").addEventListener("click", async () => {
+  metro.on = !metro.on;
+  if (metro.on) {
+    await ensureAudio();
+    if (!metroBpm()) setLog("Metronome armed — it starts clicking once a tempo is known (run the transcription, or type a BPM in its settings)");
+  }
+  rescheduleMetro();
+});
+$("metro-open").addEventListener("click", () => { $("metro-panel").classList.toggle("hidden"); renderMetro(); });
+document.addEventListener("click", (e) => {
+  if (!$("metro-wrap").contains(e.target)) $("metro-panel").classList.add("hidden");
+});
+$("metro-bpm").addEventListener("change", () => {
+  const v = parseFloat($("metro-bpm").value);
+  if (isFinite(v)) metro.bpm = Math.min(999, Math.max(20, v));
+  rescheduleMetro();
+});
+$("metro-half").addEventListener("click", () => { const b = metroBpm(); if (b) { metro.bpm = Math.max(20, b / 2); rescheduleMetro(); } });
+$("metro-double").addEventListener("click", () => { const b = metroBpm(); if (b) { metro.bpm = Math.min(999, b * 2); rescheduleMetro(); } });
+$("metro-auto").addEventListener("click", () => { metro.bpm = null; metro.auto = autoFitMetro(); rescheduleMetro(); });
+$("metro-sig").addEventListener("change", () => {
+  metro.beats = parseInt($("metro-sig").value, 10) || 4;
+  // the downbeat depends on the meter — re-anchor the auto grid's beat 1 to it
+  if (metro.auto && metro.auto.period) {
+    metro.auto.offset = Math.round(downbeatOffset(metro.auto.period, metro.auto.offset, metro.beats) * 1000) / 1000;
+  }
+  rescheduleMetro();
+});
+$("metro-offset").addEventListener("change", () => {
+  const v = parseFloat($("metro-offset").value);
+  if (isFinite(v)) metro.offset = v;
+  rescheduleMetro();
+});
+$("metro-mark").addEventListener("click", () => { metro.offset = Math.round(nowContent() * 100) / 100; rescheduleMetro(); });
+$("metro-pick").addEventListener("click", () => { if (metroPick) cancelMetroPick(); else startMetroPick(); });
+$("metro-vol").addEventListener("input", () => { metroGain.gain.value = parseFloat($("metro-vol").value); });
 
 /* ------------------------------------------------------------------ */
 /* scroll + zoom sync                                                  */
@@ -1128,6 +1555,7 @@ $("roll-wrap").addEventListener("pointerup", (e) => {
     setLoop(tA, tB);
     return;
   }
+  if (metroPickClick(e.offsetX)) return;
   if (editMode) toggleNote(e.offsetX, e.offsetY);
   else seekAll((roll.scrollPx + e.offsetX) / engine.pxPerSec);
 });
@@ -1233,6 +1661,7 @@ async function fetchEvents() {
   const d = await api("/api/events");
   roll.events = d.events;
   engine.tempo = d.tempo;
+  metroTempoChanged();
   const manual = Math.abs(d.tempo - d.detected_tempo) > 0.001;
   $("tempo-display").textContent = d.tempo.toFixed(1) + " BPM" + (manual ? " (manual)" : "");
   $("out-tempo").textContent = manual
@@ -1528,6 +1957,7 @@ const playlist = {
   party: false,
   loading: false,
   autoplay: false,    // pressing play with nothing loaded but a queued song: play it once loaded
+  autoNext: false,    // autoplay toggle: when a song ends, load + play the next queued one
 };
 
 function updateShuffleBtn() {
@@ -1748,6 +2178,19 @@ $("btn-shuffle").addEventListener("click", () => {
 $("queue-prev").addEventListener("click", prevSong);
 $("queue-next").addEventListener("click", nextSong);
 $("queue-clear").addEventListener("click", clearQueue);
+
+function updateAutoplayBtn() {
+  const btn = $("btn-autoplay");
+  btn.classList.toggle("on", playlist.autoNext);
+  btn.classList.toggle("off", !playlist.autoNext);
+  btn.title = playlist.autoNext
+    ? "Autoplay ON — the next queued song starts when this one ends. Click to turn off."
+    : "Autoplay OFF — click to start the next queued song automatically when this one ends.";
+}
+$("btn-autoplay").addEventListener("click", () => {
+  playlist.autoNext = !playlist.autoNext;
+  updateAutoplayBtn();
+});
 
 /* ---- drop OS audio files onto the queue panel to enqueue them ---- */
 const QUEUE_DROP_EXTS = ["wav", "mp3", "flac", "m4a", "ogg", "aac", "aiff", "opus"];
@@ -2183,7 +2626,13 @@ async function poll(fast) {
       $("tempo-display").textContent = "";
       $("out-tempo").textContent = "";
       $("out-bpm").value = "";
-      $("zoom").value = 0;  // fit the whole new file
+      // zoom is deliberately NOT reset — the zoom level carries across track changes
+      engine.tempo = null;   // stale until the new song's transcription arrives
+      metro.bpm = null;      // drop the hand-tune; re-lock onto the new song's tempo
+      metro.auto = null;     // drop the old song's fitted grid
+      metro.offset = null;   // follow the new fit's beat-1 unless re-marked
+      if (metroPick) cancelMetroPick();
+      rescheduleMetro();
       // The transport keeps running while the new file decodes, so by the time the lane
       // renders the needle has crept forward (and the new song starts mid-way). Pin it
       // back to 0 once loading finishes so a track change always plays from the top.
@@ -2262,6 +2711,12 @@ function raf() {
       Tone.Transport.pause();
       stopAudio();
       Tone.Transport.seconds = engine.duration / engine.speed;
+      // autoplay: hand the transport to the next queued song (party shuffle refills the queue)
+      if (playlist.autoNext && !playlist.loading &&
+          (playlist.queue.length || (playlist.party && playlist.songs.length))) {
+        playlist.autoplay = true;   // poll() presses play once the new song's lane loads
+        nextSong();
+      }
     }
   }
   renderPlayButton();
@@ -2283,6 +2738,8 @@ engine.synths = makeSynths();
 applyMix();
 renderStemLanes();   // show placeholder lanes for the default selection
 applyZoom();
+renderMetro();
+updateAutoplayBtn();
 poll(true);
 loadLibrary();       // index any --library roots; enables party shuffle if configured
 requestAnimationFrame(raf);

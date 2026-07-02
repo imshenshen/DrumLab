@@ -150,6 +150,24 @@ button.t-stop { background: var(--stop); }
   font-size: 11px; padding: 0;
 }
 
+/* ---- metronome: compact header pill + pop-down settings panel ---- */
+#metro-wrap { position: relative; display: flex; align-items: center; }
+#metro-wrap .hdr-icon { height: 26px; min-width: 30px; padding: 0 8px; border: none; cursor: pointer; }
+#metro-toggle.on { background: var(--accent); color: #0d1117; }
+#metro-open { gap: 5px; font-family: Consolas, monospace; font-size: 11.5px; }
+.metro-caret { font-size: 9px; opacity: 0.7; }
+#metro-panel {
+  position: absolute; top: calc(100% + 7px); right: 0; z-index: 60; width: 276px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+  padding: 11px 12px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  display: flex; flex-direction: column; gap: 9px;
+}
+.metro-row { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.metro-lab { width: 46px; flex: none; color: var(--dim); }
+#metro-bpm, #metro-offset { width: 64px; }
+#metro-sig { flex: 1; }
+#metro-vol { flex: 1; min-width: 80px; }
+
 #zoom-wrap { display: flex; align-items: center; gap: 6px; }
 #zoom { width: 150px; }
 .zoom-btn {
@@ -334,9 +352,9 @@ button:disabled { opacity: 0.4; cursor: default; }
 }
 .hdr-icon:disabled { opacity: 0.4; cursor: not-allowed; }
 /* shuffle: dim + slash when party is off, accent fill when on */
-#btn-shuffle .slash { display: none; }
-#btn-shuffle.off .slash { display: inline; }
-#btn-shuffle.on { background: var(--accent); color: #0d1117; }
+#btn-shuffle .slash, #btn-autoplay .slash { display: none; }
+#btn-shuffle.off .slash, #btn-autoplay.off .slash { display: inline; }
+#btn-shuffle.on, #btn-autoplay.on { background: var(--accent); color: #0d1117; }
 
 /* ---- up-next queue (sits where the sample pad used to, right of input) ---- */
 .queue-head {
@@ -348,6 +366,7 @@ button:disabled { opacity: 0.4; cursor: default; }
   background: var(--panel2); color: var(--dim); border: 1px solid var(--line);
 }
 .q-mini:not(:disabled):hover { border-color: var(--accent); color: var(--accent); }
+.q-mini.active { background: var(--accent); border-color: var(--accent); color: #0d1117; }
 .q-mini:disabled { opacity: 0.4; cursor: default; }
 .q-mini svg { display: block; }  /* center the folder icon like the × glyph, no baseline gap */
 #queue-list {
