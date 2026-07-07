@@ -2235,7 +2235,7 @@ function openLibrary() {
   $("library-modal").classList.remove("hidden");
   if (playlist.configured) showSongsView(); else showBrowseView();
 }
-function closeLibrary() { $("library-modal").classList.add("hidden"); }
+function closeLibrary() { stopPreview(); $("library-modal").classList.add("hidden"); }
 
 function showBrowseView(dir) {
   $("library-title").textContent = "Pick a music folder";
@@ -2248,6 +2248,9 @@ function showSongsView() {
   $("library-browse").classList.add("hidden");
   $("library-songs").classList.remove("hidden");
   renderSongList();
+  const search = $("song-search");
+  search.focus();
+  search.select();
 }
 
 function browseItem(iconEntity, label, onClick) {
@@ -2299,6 +2302,38 @@ async function useFolder() {
   }
 }
 
+/* ---- song preview: one shared <audio> (so only one plays at a time), independent of
+   the master transport but parking it while a preview runs ---- */
+const preview = { el: new Audio(), path: null, resumeMaster: false };
+preview.el.addEventListener("ended", () => stopPreview());
+// skip the intro — song starts are often silent/samey, 30% in is representative
+preview.el.addEventListener("loadedmetadata", () => {
+  if (preview.path && isFinite(preview.el.duration)) preview.el.currentTime = preview.el.duration * 0.3;
+});
+
+function startPreview(song) {
+  if (preview.path === song.path) { stopPreview(); return; }
+  if (!preview.path) {
+    // first preview of this run: park the master transport, remember whether to resume
+    preview.resumeMaster = Tone.Transport.state === "started";
+    if (preview.resumeMaster) { Tone.Transport.pause(); stopAudio(); renderPlayButton(); }
+  }
+  preview.path = song.path;
+  preview.el.src = "/api/library/preview?path=" + encodeURIComponent(song.path);
+  preview.el.play().catch((e) => { setLog("Preview: " + e.message, true); stopPreview(); });
+  renderSongList();
+}
+
+function stopPreview() {
+  if (!preview.path) return;
+  preview.path = null;
+  preview.el.pause();
+  preview.el.removeAttribute("src");
+  preview.el.load();
+  if (preview.resumeMaster) { preview.resumeMaster = false; togglePlay(); }
+  if (!$("library-songs").classList.contains("hidden")) renderSongList();
+}
+
 function renderSongList() {
   const list = $("song-list");
   const q = ($("song-search").value || "").toLowerCase();
@@ -2314,6 +2349,13 @@ function renderSongList() {
     }
     const el = document.createElement("div");
     el.className = "song-item"; el.title = "Add to queue";
+    const playing = preview.path === song.path;
+    const pv = document.createElement("button");
+    pv.className = "q-mini si-preview" + (playing ? " active" : "");
+    pv.innerHTML = playing ? "&#9632;" : "&#9654;";
+    pv.title = playing ? "Stop preview" : "Preview";
+    pv.addEventListener("click", (ev) => { ev.stopPropagation(); startPreview(song); });
+    el.appendChild(pv);
     const nm = document.createElement("span"); nm.className = "si-name"; nm.textContent = song.name;
     el.appendChild(nm);
     el.addEventListener("click", () => { enqueue(song); setLog("Queued " + song.name); });
@@ -2567,10 +2609,17 @@ function buildSampleSlots() {
 $("btn-play").addEventListener("click", togglePlay);
 $("btn-stop").addEventListener("click", stopTransport);
 document.addEventListener("keydown", (e) => {
-  if (e.code === "Space" && !["INPUT", "SELECT", "TEXTAREA"].includes(document.activeElement.tagName)) {
-    e.preventDefault();
-    togglePlay();
-  }
+  if (e.code !== "Space") return;
+  const el = document.activeElement;
+  // Space in a typing field types; anywhere else it is play/pause ONLY — drop focus
+  // first so it can never re-trigger the last-clicked button / select / slider.
+  const typing = el && (el.tagName === "TEXTAREA" ||
+    (el.tagName === "INPUT" && !["range", "checkbox", "radio", "button"].includes(el.type)));
+  if (typing) return;
+  e.preventDefault();
+  if (el && el.blur) el.blur();
+  if (preview.path) { stopPreview(); return; }  // a running preview owns play/pause
+  togglePlay();
 });
 
 /* ------------------------------------------------------------------ */

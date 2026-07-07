@@ -34,7 +34,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-APP_VERSION = "7.0"
+APP_VERSION = "7.1"
 APP_DIR = Path(__file__).resolve().parent
 WORK = APP_DIR / "workdir"
 UPLOADS = WORK / "uploads"
@@ -792,6 +792,22 @@ def add_root(params: dict):
     """Register a library root chosen via the in-UI folder picker, then rescan."""
     add_library_root(params.get("path", ""))
     return get_library(refresh=1)
+
+
+_PREVIEW_MIME = {
+    ".wav": "audio/wav", ".mp3": "audio/mpeg", ".flac": "audio/flac",
+    ".m4a": "audio/mp4", ".ogg": "audio/ogg", ".aac": "audio/aac",
+    ".aiff": "audio/aiff", ".opus": "audio/ogg",
+}
+
+
+@app.get("/api/library/preview")
+def library_preview(path: str):
+    """Stream a library file as-is for the modal's preview player; the browser decodes
+    it directly. Same traversal guard as /api/load_path."""
+    p = library_file(path)
+    return FileResponse(str(p), media_type=_PREVIEW_MIME.get(p.suffix.lower(), "application/octet-stream"),
+                        headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/browse")

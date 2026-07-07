@@ -367,6 +367,7 @@ button:disabled { opacity: 0.4; cursor: default; }
 }
 .q-mini:not(:disabled):hover { border-color: var(--accent); color: var(--accent); }
 .q-mini.active { background: var(--accent); border-color: var(--accent); color: #0d1117; }
+.q-mini.active:not(:disabled):hover { color: #0d1117; filter: brightness(0.8); }  /* keep the dark glyph (accent-on-accent = invisible), dim to signal hover */
 .q-mini:disabled { opacity: 0.4; cursor: default; }
 .q-mini svg { display: block; }  /* center the folder icon like the × glyph, no baseline gap */
 #queue-list {
@@ -435,6 +436,7 @@ button:disabled { opacity: 0.4; cursor: default; }
   background: var(--panel2); border: 1px solid var(--line); font-family: Consolas, monospace;
 }
 .drive-chip:hover { border-color: var(--accent); }
+.song-item .si-preview { flex: none; min-width: 24px; padding: 1px 5px; font-size: 10px; line-height: 1.5; }
 .song-item .si-name { flex: 1; min-width: 0; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .song-item .si-artist { color: var(--dim); font-size: 11px; flex: none; max-width: 38%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .song-group { font-size: 10px; letter-spacing: 0.5px; color: var(--dim); text-transform: uppercase; margin: 6px 0 1px; }
