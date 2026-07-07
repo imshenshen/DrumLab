@@ -2319,6 +2319,8 @@ function startPreview(song) {
     if (preview.resumeMaster) { Tone.Transport.pause(); stopAudio(); renderPlayButton(); }
   }
   preview.path = song.path;
+  // follow the master knob; element volume caps at 1, so boosts above 0 dB don't apply
+  preview.el.volume = Math.min(1, master.gain.value);
   preview.el.src = "/api/library/preview?path=" + encodeURIComponent(song.path);
   preview.el.play().catch((e) => { setLog("Preview: " + e.message, true); stopPreview(); });
   renderSongList();
@@ -2518,7 +2520,7 @@ $("btn-reset").addEventListener("click", async () => {
 const knobs = {
   master: makeDbKnob("knob-master", {
     label: "Master", size: 36, maxDb: 20,
-    onGain: (g) => { master.gain.value = g; },
+    onGain: (g) => { master.gain.value = g; preview.el.volume = Math.min(1, g); },
   }),
   midi: makeDbKnob("knob-midi", {
     label: "Gain", size: 40, maxDb: 6,
