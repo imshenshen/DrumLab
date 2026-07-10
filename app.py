@@ -18,6 +18,7 @@ import importlib.util
 import json
 import os
 import re
+import signal
 import shutil
 import socket
 import subprocess
@@ -73,7 +74,15 @@ ONSET_COMP_SEC = 0.0
 GM_MAP = {"kick": 36, "snare": 38, "hihat": 42, "tom": 45, "cymbal": 49}
 GRID_Q = {"1/8": Fraction(1, 2), "1/16": Fraction(1, 4), "1/16T": Fraction(1, 6), "1/32": Fraction(1, 8)}
 
-CREATE_FLAGS = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+IS_WINDOWS = os.name == "nt"
+# Windows-only flags must not be accessed unconditionally: subprocess does not
+# define them on Linux/macOS.  Long-running jobs get their own process group on
+# every platform so cancellation also terminates Demucs child processes.
+CREATE_FLAGS = (
+    subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+    if IS_WINDOWS else 0
+)
+HIDDEN_FLAGS = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 # ---------------------------------------------------------------------------
@@ -106,10 +115,26 @@ def kill_tree(proc: subprocess.Popen) -> None:
     """Kill a process and all of its children (Demucs spawns GPU workers)."""
     if proc is None or proc.poll() is not None:
         return
-    subprocess.run(
-        ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-        capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW,
-    )
+    if IS_WINDOWS:
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+            capture_output=True, creationflags=HIDDEN_FLAGS,
+        )
+        return
+
+    # stream_subprocess starts a new session on POSIX, making the subprocess
+    # PID the process-group ID.  Stop the group gracefully, then force it if a
+    # child (for example a GPU worker) does not exit promptly.
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        proc.wait(timeout=5)
+    except ProcessLookupError:
+        return
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except ProcessLookupError:
+            pass
 
 
 class Job:
@@ -222,9 +247,13 @@ def stream_subprocess(job: Job, cmd: list) -> int:
     env = dict(os.environ)
     env["PYTHONIOENCODING"] = "utf-8"
     env.setdefault("PYTHONUNBUFFERED", "1")
+    platform_kwargs = (
+        {"creationflags": CREATE_FLAGS}
+        if IS_WINDOWS else {"start_new_session": True}
+    )
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        bufsize=0, creationflags=CREATE_FLAGS, cwd=str(APP_DIR), env=env,
+        bufsize=0, cwd=str(APP_DIR), env=env, **platform_kwargs,
     )
     with job.lock:
         job.proc = proc
@@ -592,7 +621,7 @@ def probe_tags(path: Path) -> dict:
         r = subprocess.run(
             ["ffprobe", "-v", "quiet", "-print_format", "json",
              "-show_format", "-show_streams", str(path)],
-            capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW, timeout=30,
+            capture_output=True, creationflags=HIDDEN_FLAGS, timeout=30,
         )
         data = json.loads(r.stdout.decode("utf-8", "replace") or "{}") if r.returncode == 0 else {}
     except (OSError, ValueError, subprocess.SubprocessError):
@@ -648,7 +677,7 @@ def ingest_audio(data: bytes, filename: str) -> dict:
     if not wav.exists():
         r = subprocess.run(
             ["ffmpeg", "-y", "-i", str(orig), "-vn", "-acodec", "pcm_s16le", str(wav)],
-            capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW, timeout=300,
+            capture_output=True, creationflags=HIDDEN_FLAGS, timeout=300,
         )
         if r.returncode != 0 or not wav.exists():
             tail = r.stderr.decode("utf-8", "replace")[-400:]
@@ -663,7 +692,7 @@ def ingest_audio(data: bytes, filename: str) -> dict:
     if not art.exists():
         r = subprocess.run(
             ["ffmpeg", "-y", "-i", str(orig), "-an", "-map", "0:v:0", "-frames:v", "1", str(art)],
-            capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW, timeout=60,
+            capture_output=True, creationflags=HIDDEN_FLAGS, timeout=60,
         )
         if r.returncode != 0 or not art.exists() or art.stat().st_size == 0:
             art.unlink(missing_ok=True)
@@ -954,7 +983,7 @@ def _ensure_backing(parts: list) -> tuple:
     filt = f"amix=inputs={len(parts)}:normalize=0"
     r = subprocess.run(
         ["ffmpeg", "-y"] + inputs + ["-filter_complex", filt, "-c:a", "pcm_s16le", str(cached)],
-        capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW, timeout=600)
+        capture_output=True, creationflags=HIDDEN_FLAGS, timeout=600)
     if r.returncode != 0 or not cached.exists():
         cached.unlink(missing_ok=True)
         raise HTTPException(500, "Backing mix failed: " + r.stderr.decode("utf-8", "replace")[-300:])
@@ -984,7 +1013,7 @@ CHUNK_SEC = 8.0                       # content seconds per chunk (must match ap
 _STRETCH_GUARD = threading.Lock()
 _STRETCH_LOCKS: dict = {}             # cache path -> per-file lock (one render at a time)
 # render stretches below normal priority so they never starve demucs/adtof inference
-_LOW_PRIO = subprocess.CREATE_NO_WINDOW | getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0)
+_LOW_PRIO = HIDDEN_FLAGS | getattr(subprocess, "BELOW_NORMAL_PRIORITY_CLASS", 0)
 _HAVE_RB: Optional[bool] = None
 
 
@@ -993,7 +1022,7 @@ def _have_rubberband() -> bool:
     global _HAVE_RB
     if _HAVE_RB is None:
         r = subprocess.run(["ffmpeg", "-hide_banner", "-filters"], capture_output=True,
-                           creationflags=subprocess.CREATE_NO_WINDOW, timeout=30)
+                           creationflags=HIDDEN_FLAGS, timeout=30)
         _HAVE_RB = b" rubberband " in r.stdout
     return _HAVE_RB
 
@@ -1077,7 +1106,7 @@ def audio_chunk(lane: str, i: int, speed: float = 1.0, parts: Optional[str] = No
         r = subprocess.run(
             ["ffmpeg", "-y", "-ss", f"{f0:.6f}", "-t", f"{fdur:.6f}", "-i", src,
              "-c:a", "pcm_s16le", str(tmp)],
-            capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW, timeout=120)
+            capture_output=True, creationflags=HIDDEN_FLAGS, timeout=120)
         if r.returncode != 0 or not tmp.exists():
             raise HTTPException(500, "Slice failed: " + r.stderr.decode("utf-8", "replace")[-300:])
         data = tmp.read_bytes()
@@ -1166,7 +1195,7 @@ def _render_stem(which: str, fmt: str, speed: float, parts: Optional[str]) -> tu
         filt = _stretch_args(speed) if stretch else []
         r = subprocess.run(
             ["ffmpeg", "-y", "-i", src] + filt + args + [str(cached)],
-            capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW, timeout=600,
+            capture_output=True, creationflags=HIDDEN_FLAGS, timeout=600,
         )
         if r.returncode != 0 or not cached.exists():
             raise HTTPException(500, "FFmpeg conversion failed: " + r.stderr.decode("utf-8", "replace")[-300:])
