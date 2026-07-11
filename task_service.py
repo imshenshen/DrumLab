@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import bisect
+import concurrent.futures
 import importlib.util
 import json
 import os
@@ -1318,14 +1319,25 @@ class TaskManager:
         self._record_offline(task_id, recording_id)
 
     def _record_offline(self, task_id: str, recording_id: str) -> None:
-        from PIL import Image, ImageDraw
+        from PIL import Image
         from playwright.sync_api import sync_playwright
 
         recording = self.get_recording(task_id, recording_id)
+        log_prefix = f"[recording {task_id[:8]}/{recording_id[:8]}]"
+        def record_log(message: str) -> None:
+            print(f"{log_prefix} {message}", flush=True)
+
         folder = self.root / task_id / "recordings" / recording_id
         folder.mkdir(parents=True, exist_ok=True)
         self._record_update(task_id, recording_id, status="running")
+        record_log(
+            f"start {recording['width']}x{recording['height']} "
+            f"{recording.get('fps', 30)} FPS MP4/NVENC"
+        )
         score_png = folder / "score.png"
+        page_pngs: list[Path] = []
+        engrave_started = time.monotonic()
+        record_log("engraving score in Chromium")
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(**self._recording_launch_kwargs(playwright))
             context = browser.new_context(
@@ -1342,24 +1354,53 @@ class TaskManager:
             )
             page.wait_for_function("window.__DRUMLAB_SCORE_READY__ === true", timeout=120000)
             timeline = page.evaluate("window.__DRUMLAB_EXPORT_TIMELINE__()")
-            page.locator("#sheet-wrap").screenshot(path=str(score_png))
+            page_locators = page.locator("#sheet svg")
+            page_count = page_locators.count()
+            if page_count == 0:
+                raise RuntimeError("OSMD did not render any SVG score pages")
+            for page_index in range(page_count):
+                page_png = folder / f"score-page-{page_index}.png"
+                page_locators.nth(page_index).screenshot(path=str(page_png))
+                page_pngs.append(page_png)
             context.close()
             browser.close()
+        record_log(
+            f"{len(page_pngs)} score page(s) captured in "
+            f"{time.monotonic() - engrave_started:.1f}s"
+        )
 
         points = timeline.get("points") or []
         if not points:
             raise RuntimeError("The score did not expose any cursor positions")
-        score = Image.open(score_png).convert("RGB")
         css_score_size = (
-            max(1, int(round(float(timeline.get("width") or score.width)))),
-            max(1, int(round(float(timeline.get("height") or score.height)))),
+            max(1, int(round(float(timeline.get("width") or recording["width"])))),
+            max(1, int(round(float(timeline.get("height") or recording["height"])))),
         )
-        if score.size != css_score_size:
-            resampling = getattr(Image, "Resampling", Image)
-            score = score.resize(css_score_size, resampling.LANCZOS)
+        score = Image.new("RGB", css_score_size, (255, 255, 255))
+        page_boxes = timeline.get("pages") or []
+        if len(page_boxes) != len(page_pngs):
+            raise RuntimeError("OSMD page metadata does not match captured SVG pages")
+        resampling = getattr(Image, "Resampling", Image)
+        for page_box, page_png in zip(page_boxes, page_pngs):
+            engraved_page = Image.open(page_png).convert("RGB")
+            page_size = (
+                max(1, int(round(float(page_box["width"])))),
+                max(1, int(round(float(page_box["height"])))),
+            )
+            if engraved_page.size != page_size:
+                engraved_page = engraved_page.resize(page_size, resampling.LANCZOS)
+            score.paste(
+                engraved_page,
+                (int(round(float(page_box["x"]))), int(round(float(page_box["y"])))),
+            )
+        score_pixels = np.asarray(score, dtype=np.uint8)
         width, height = int(recording["width"]), int(recording["height"])
         fps = int(recording.get("fps", 30))
-        duration = max(0.1, float(timeline.get("duration") or self.tasks[task_id].get("duration") or 0))
+        audio_duration = max(
+            0.1,
+            float(timeline.get("duration") or self.tasks[task_id].get("duration") or 0),
+        )
+        duration = audio_duration
         frame_count = max(1, math.ceil(duration * fps))
         final = folder / "dynamic-score.mp4"
         command = [
@@ -1371,50 +1412,77 @@ class TaskManager:
             "-movflags", "+faststart", str(final),
         ]
         process = subprocess.Popen(command, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
-        times = [float(point["t"]) for point in points]
+        record_log("NVENC process started; preparing frame timeline")
+        point_times = [float(point["t"]) for point in points]
         scroll_y = 0.0
         sheet_x = max(0, (width - score.width) // 2)
         sheet_top = 12
+        frame_specs = []
+        for frame_index in range(frame_count):
+            seconds = frame_index / fps
+            point = points[max(0, bisect.bisect_right(point_times, seconds) - 1)]
+            target_scroll = max(0.0, min(
+                max(0, score.height - height + sheet_top * 2),
+                float(point["y"]) - height * 0.30,
+            ))
+            scroll_y += (target_scroll - scroll_y) * min(1.0, 2.5 / fps)
+            frame_specs.append((frame_index, point, int(round(scroll_y))))
+
+        def render_frame(spec) -> bytes:
+            _, point, scroll = spec
+            frame = np.full((height, width, 3), 255, dtype=np.uint8)
+            source_top = max(0, scroll - sheet_top)
+            destination_top = max(0, sheet_top - scroll)
+            visible_height = min(score.height - source_top, height - destination_top)
+            if visible_height > 0:
+                paste_width = min(score.width, width - sheet_x)
+                frame[destination_top:destination_top + visible_height,
+                      sheet_x:sheet_x + paste_width] = score_pixels[
+                          source_top:source_top + visible_height, :paste_width]
+            cursor_x = round(sheet_x + float(point["x"]))
+            cursor_y = round(sheet_top + float(point["y"]) - scroll)
+            cursor_w = max(4, round(float(point.get("width", 4))))
+            cursor_h = max(12, round(float(point.get("height", 20))))
+            x0, x1 = max(0, cursor_x), min(width, cursor_x + cursor_w + 1)
+            y0, y1 = max(0, cursor_y), min(height, cursor_y + cursor_h + 1)
+            if x1 > x0 and y1 > y0:
+                alpha = 92 / 255.0
+                region = frame[y0:y1, x0:x1]
+                region[:] = (
+                    region.astype(np.float32) * (1.0 - alpha)
+                    + np.array((66, 214, 111), dtype=np.float32) * alpha
+                ).astype(np.uint8)
+            return frame.tobytes()
+
+        workers = min(12, max(2, os.cpu_count() or 2))
+        batch_size = workers * 3
+        render_started = last_log = time.monotonic()
+        record_log(f"rendering {frame_count} frames with {workers} CPU workers")
         try:
             assert process.stdin is not None
-            for frame_index in range(frame_count):
-                seconds = frame_index / fps
-                point = points[max(0, bisect.bisect_right(times, seconds) - 1)]
-                target_scroll = max(0.0, min(
-                    max(0, score.height - height + sheet_top * 2),
-                    float(point["y"]) - height * 0.30,
-                ))
-                # Ease toward the current system instead of snapping when the
-                # cursor crosses a system break. The score is wider in recording
-                # mode, so this gentle follow keeps downward motion readable.
-                scroll_y += (target_scroll - scroll_y) * min(1.0, 2.5 / fps)
-                scroll = int(round(scroll_y))
-                # Keep uncovered canvas white while the tall score scrolls.
-                frame = Image.new("RGB", (width, height), (255, 255, 255))
-                source_top = max(0, scroll - sheet_top)
-                destination_top = max(0, sheet_top - scroll)
-                visible_height = min(score.height - source_top, height - destination_top)
-                if visible_height > 0:
-                    crop = score.crop((0, source_top, score.width, source_top + visible_height))
-                    frame.paste(crop, (sheet_x, destination_top))
-                # Draw in RGBA mode so notation remains visible through the
-                # playback cursor instead of being covered by a solid block.
-                draw = ImageDraw.Draw(frame, "RGBA")
-                cursor_x = round(sheet_x + float(point["x"]))
-                cursor_y = round(sheet_top + float(point["y"]) - scroll)
-                cursor_w = max(4, round(float(point.get("width", 4))))
-                cursor_h = max(12, round(float(point.get("height", 20))))
-                draw.rectangle(
-                    (cursor_x, cursor_y, cursor_x + cursor_w, cursor_y + cursor_h),
-                    fill=(66, 214, 111, 92),
-                )
-                process.stdin.write(frame.tobytes())
-                if frame_index % max(fps, 30) == 0:
-                    self._record_update(
-                        task_id, recording_id,
-                        progress=round(frame_index / frame_count, 4),
-                        rendered_seconds=round(seconds, 2),
-                    )
+            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
+                for batch_start in range(0, frame_count, batch_size):
+                    batch = frame_specs[batch_start:batch_start + batch_size]
+                    for offset, frame_bytes in enumerate(executor.map(render_frame, batch)):
+                        frame_index = batch_start + offset
+                        process.stdin.write(frame_bytes)
+                        now = time.monotonic()
+                        if now - last_log >= 5.0 or frame_index + 1 == frame_count:
+                            elapsed = max(0.001, now - render_started)
+                            render_fps = (frame_index + 1) / elapsed
+                            eta = (frame_count - frame_index - 1) / max(0.001, render_fps)
+                            record_log(
+                                f"{frame_index + 1}/{frame_count} frames "
+                                f"({render_fps:.1f} FPS, ETA {eta:.0f}s)"
+                            )
+                            self._record_update(
+                                task_id, recording_id,
+                                progress=round((frame_index + 1) / frame_count, 4),
+                                rendered_seconds=round((frame_index + 1) / fps, 2),
+                                render_fps=round(render_fps, 2),
+                                eta_seconds=round(eta, 1),
+                            )
+                            last_log = now
             process.stdin.close()
             stderr = process.stderr.read().decode("utf-8", "replace") if process.stderr else ""
             return_code = process.wait()
@@ -1428,10 +1496,13 @@ class TaskManager:
             if process.poll() is None:
                 process.kill()
         score_png.unlink(missing_ok=True)
+        for page_png in page_pngs:
+            page_png.unlink(missing_ok=True)
         self._record_update(
             task_id, recording_id, status="completed", path=str(final), progress=1.0,
             rendered_seconds=round(duration, 2),
         )
+        record_log(f"completed in {time.monotonic() - engrave_started:.1f}s: {final}")
 
     def recording_file(self, task_id: str, recording_id: str) -> Path:
         recording = self.get_recording(task_id, recording_id)

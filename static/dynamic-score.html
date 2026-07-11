@@ -251,8 +251,19 @@ window.__DRUMLAB_EXPORT_TIMELINE__ = () => {
   const contentHeight = Math.ceil(Math.max(wrap.scrollHeight, lastContentBottom + 45));
   $("sheet").style.height = `${contentHeight}px`;
   wrap.style.height = `${contentHeight}px`;
+  const pages = Array.from($("sheet").querySelectorAll("svg")).map((svg, index) => {
+    const box = svg.getBoundingClientRect();
+    return {
+      index,
+      x: box.left - sheetBox.left,
+      y: box.top - sheetBox.top,
+      width: box.width,
+      height: box.height,
+    };
+  });
   return {
     points,
+    pages,
     width: Math.ceil(wrap.scrollWidth),
     height: contentHeight,
     duration: Number(audio.duration || meta.duration || 0),

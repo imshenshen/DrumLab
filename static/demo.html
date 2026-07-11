@@ -152,7 +152,11 @@ function recordingRows(task) {
   for (const recording of values) {
     const row = el("div", "recording");
     row.append(el("span", `badge ${recording.status}`, recording.status));
-    row.append(document.createTextNode(`${recording.width}×${recording.height} · ${recording.fps || 30} FPS · NVENC MP4 · A4 ${recording.paper_size || "fit"}${recording.status === "running" ? ` · ${Math.round((recording.progress || 0) * 100)}%` : ""}`));
+    const runningDetail = recording.status === "running"
+      ? ` · ${Math.round((recording.progress || 0) * 100)}%` +
+        (recording.render_fps ? ` · ${recording.render_fps} 帧/秒 · 剩余约 ${Math.ceil(recording.eta_seconds || 0)} 秒` : "")
+      : "";
+    row.append(document.createTextNode(`${recording.width}×${recording.height} · ${recording.fps || 30} FPS · NVENC MP4 · A4 ${recording.paper_size || "fit"}${runningDetail}`));
     if (recording.status === "completed") {
       const download = el("a", "", "下载 MP4"); download.href = recording.url; row.append(download);
     } else if (recording.error) row.append(el("span", "error-text", recording.error));
