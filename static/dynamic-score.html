@@ -34,8 +34,9 @@
   #message.hidden { display:none; }
   body.recording { grid-template-rows:1fr; }
   body.recording header, body.recording #controls, body.recording #notation-controls { display:none; }
-  body.recording #viewport { grid-row:1; }
+  body.recording #viewport { grid-row:1; background:#fff; }
   body.recording #sheet-wrap { width:calc(100% - 24px); max-width:none; margin:12px auto; padding:18px 22px 45px; }
+  body.recording [id^="cursorImg"] { opacity:.38; }
   @media (max-width:700px) {
     #controls { grid-template-columns:auto auto 1fr auto; gap:7px; padding:7px; }
     #speed, #paper-size { display:none; }

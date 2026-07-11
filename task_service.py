@@ -1389,19 +1389,25 @@ class TaskManager:
                 # mode, so this gentle follow keeps downward motion readable.
                 scroll_y += (target_scroll - scroll_y) * min(1.0, 2.5 / fps)
                 scroll = int(round(scroll_y))
-                frame = Image.new("RGB", (width, height), (217, 220, 226))
+                # Keep uncovered canvas white while the tall score scrolls.
+                frame = Image.new("RGB", (width, height), (255, 255, 255))
                 source_top = max(0, scroll - sheet_top)
                 destination_top = max(0, sheet_top - scroll)
                 visible_height = min(score.height - source_top, height - destination_top)
                 if visible_height > 0:
                     crop = score.crop((0, source_top, score.width, source_top + visible_height))
                     frame.paste(crop, (sheet_x, destination_top))
-                draw = ImageDraw.Draw(frame)
+                # Draw in RGBA mode so notation remains visible through the
+                # playback cursor instead of being covered by a solid block.
+                draw = ImageDraw.Draw(frame, "RGBA")
                 cursor_x = round(sheet_x + float(point["x"]))
                 cursor_y = round(sheet_top + float(point["y"]) - scroll)
                 cursor_w = max(4, round(float(point.get("width", 4))))
                 cursor_h = max(12, round(float(point.get("height", 20))))
-                draw.rectangle((cursor_x, cursor_y, cursor_x + cursor_w, cursor_y + cursor_h), fill=(66, 214, 111))
+                draw.rectangle(
+                    (cursor_x, cursor_y, cursor_x + cursor_w, cursor_y + cursor_h),
+                    fill=(66, 214, 111, 92),
+                )
                 process.stdin.write(frame.tobytes())
                 if frame_index % max(fps, 30) == 0:
                     self._record_update(
