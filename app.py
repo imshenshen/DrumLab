@@ -665,6 +665,11 @@ def create_task(params: dict):
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from None
+    except OSError as exc:
+        raise HTTPException(
+            500,
+            f"Task output root became unavailable or read-only: {exc}",
+        ) from None
     return task
 
 
@@ -677,6 +682,14 @@ def list_tasks(limit: int = 100):
 def get_task(task_id: str):
     try:
         return TASKS.get(task_id)
+    except KeyError:
+        raise HTTPException(404, "Task not found") from None
+
+
+@app.post("/api/tasks/{task_id}/stop")
+def stop_task(task_id: str):
+    try:
+        return TASKS.stop(task_id)
     except KeyError:
         raise HTTPException(404, "Task not found") from None
 
@@ -1501,6 +1514,9 @@ def main() -> None:
     ap.add_argument("--task-output-root", default=None, metavar="FOLDER",
                     help="Directory for persistent task folders and generated artifacts "
                          "(default: DrumLab/workdir/tasks).")
+    ap.add_argument("--task-timeout", type=float, default=3600, metavar="SECONDS",
+                    help="Maximum runtime for each queued score task (default: 3600; "
+                         "0 disables the timeout).")
     args = ap.parse_args()
 
     if args.preload:
@@ -1510,7 +1526,7 @@ def main() -> None:
         args.port = _first_free_port(args.host, 8765)
 
     try:
-        TASKS.configure(args.port, args.task_root, args.task_output_root)
+        TASKS.configure(args.port, args.task_root, args.task_output_root, args.task_timeout)
     except (OSError, RuntimeError, ValueError) as exc:
         raise SystemExit(f"Invalid task path configuration: {exc}") from exc
 

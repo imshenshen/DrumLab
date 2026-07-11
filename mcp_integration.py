@@ -49,8 +49,13 @@ def build_mcp_http_app(task_manager) -> tuple[Any, Any]:
 
     @server.tool()
     def get_drum_score_task(task_id: str) -> dict[str, Any]:
-        """Return queued/running/completed/failed state and artifact URLs for a task."""
+        """Return task state, timeout information, and artifact URLs."""
         return task_manager.get(task_id)
+
+    @server.tool()
+    def stop_drum_score_task(task_id: str) -> dict[str, Any]:
+        """Stop a queued/running score task and terminate its child process group."""
+        return task_manager.stop(task_id)
 
     @server.tool()
     def create_dynamic_score_recording(

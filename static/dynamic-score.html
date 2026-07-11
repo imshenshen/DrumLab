@@ -94,7 +94,9 @@ async function waitForTask() {
     statusEl.textContent = `${task.status} · ${task.stage} · ${Math.round((task.progress || 0) * 100)}%`;
     message.textContent = task.error || task.message || "Waiting for the task…";
     if (task.status === "completed") return task;
-    if (task.status === "failed") throw new Error(task.error || "Task failed");
+    if (["failed","cancelled","timed_out"].includes(task.status)) {
+      throw new Error(task.error || task.message || `Task ${task.status}`);
+    }
     await new Promise(resolve => setTimeout(resolve, 1200));
   }
 }

@@ -133,6 +133,7 @@ This starts the server on `127.0.0.1:8765` and opens it in your default browser.
 | `--library FOLDER` | index a folder for the song library / party shuffle (repeatable) |
 | `--task-root FOLDER` | restrict agent-supplied audio paths to this folder (repeatable) |
 | `--task-output-root FOLDER` | store persistent task folders and generated artifacts here |
+| `--task-timeout SECONDS` | maximum whole-pipeline runtime per task (default 3600; 0 disables) |
 
 > **Song library.** The party-shuffle / up-next browser indexes folders you point it at.
 > Pass `--library FOLDER` (repeatable) to index one or more folders at startup — e.g.
@@ -158,12 +159,18 @@ Example with separate input and output locations:
 ```sh
 python app.py --host 0.0.0.0 --port 8765 --no-browser \
   --task-root /home/shenshen/runclave-inputs \
-  --task-output-root /home/shenshen/runclave-outputs
+  --task-output-root /home/shenshen/runclave-outputs \
+  --task-timeout 1800
 ```
 
 `--task-root` controls which source audio files agents may read. `--task-output-root`
 controls where DrumLab writes task metadata, logs, decoded audio, stems, activation caches,
 MusicXML, MIDI, and silent recordings.
+
+`--task-timeout` covers the complete processing lifetime after a task leaves the queue:
+FFmpeg ingest, optional Demucs separation, ADTOF inference, and notation generation. On
+timeout DrumLab terminates the active process group and marks the task `timed_out`. A value
+of `0` disables automatic timeouts.
 
 Create a task from an absolute path that exists **on the DrumLab server**:
 
@@ -200,8 +207,13 @@ MCP clients connect to `http://HOST:PORT/mcp/` and receive these tools:
 
 - `create_drum_score_task`
 - `get_drum_score_task`
+- `stop_drum_score_task`
 - `create_dynamic_score_recording`
 - `get_dynamic_score_recording`
+
+REST clients stop a queued or running task with `POST /api/tasks/{task_id}/stop`. Queued
+tasks are marked `cancelled` immediately. Running tasks terminate their FFmpeg, Demucs, or
+ADTOF process group before being marked `cancelled`, releasing associated CUDA resources.
 
 Create a silent recording after the task completes:
 

@@ -49,6 +49,8 @@
   .badge.running { background:#163b5d; color:#71baff; }
   .badge.queued { background:#4a3818; color:#efc565; }
   .badge.failed { background:#512525; color:#ff8b88; }
+  .badge.cancelled { background:#393d47; color:#b8bfcc; }
+  .badge.timed_out { background:#5b351a; color:#ffb46e; }
   progress { width:110px; height:7px; accent-color:var(--blue); }
   .stage { display:block; margin-top:4px; color:var(--dim); font-size:11px; }
   .actions { display:flex; flex-wrap:wrap; gap:7px; min-width:250px; }
@@ -163,6 +165,16 @@ async function startRecording(taskId, ratio, width, button) {
   finally { button.disabled = false; }
 }
 
+async function stopTask(taskId, button) {
+  if (!confirm("停止这个任务？正在运行的 Demucs/ADTOF 子进程也会被终止。")) return;
+  button.disabled = true;
+  try {
+    await api(`/api/tasks/${encodeURIComponent(taskId)}/stop`, {method:"POST"});
+    await loadTasks();
+  } catch (error) { alert(error.message); }
+  finally { button.disabled = false; }
+}
+
 function taskRow(task) {
   const tr = document.createElement("tr");
   const identity = document.createElement("td");
@@ -177,7 +189,8 @@ function taskRow(task) {
 
   const options = document.createElement("td");
   const sourceLabel = task.options?.source_mode === "drum_only" ? "drum only" : esc(task.options?.model);
-  options.append(el("div", "", `${sourceLabel} · ${esc(task.options?.device)}`), el("div", "stage", `${esc(task.options?.grid)} · ${esc(task.options?.fps)} FPS`));
+  const timeoutLabel = Number(task.timeout_seconds) > 0 ? `${task.timeout_seconds}s timeout` : "no timeout";
+  options.append(el("div", "", `${sourceLabel} · ${esc(task.options?.device)}`), el("div", "stage", `${esc(task.options?.grid)} · ${esc(task.options?.fps)} FPS · ${timeoutLabel}`));
 
   const result = document.createElement("td");
   if (task.status === "completed") {
@@ -188,6 +201,12 @@ function taskRow(task) {
   const actionsCell = document.createElement("td");
   const actions = el("div", "actions");
   const completed = task.status === "completed";
+  if (["queued","running"].includes(task.status) || task.stage === "stopping") {
+    const stopButton = el("button", "secondary", task.stage === "stopping" ? "停止中…" : "停止任务");
+    stopButton.disabled = task.stage === "stopping";
+    stopButton.addEventListener("click", () => stopTask(task.id, stopButton));
+    actions.append(stopButton);
+  }
   actions.append(actionLink("打开动态谱", task.urls.page, completed));
   actions.append(actionLink("MusicXML", task.urls.musicxml, completed));
   actions.append(actionLink("MIDI", `/api/tasks/${encodeURIComponent(task.id)}/midi`, completed));
@@ -213,7 +232,8 @@ async function loadTasks() {
     } else data.tasks.forEach(task => tbody.append(taskRow(task)));
     const running = data.tasks.filter(task => task.status === "running").length;
     const queued = data.tasks.filter(task => task.status === "queued").length;
-    $("queue-summary").textContent = `${data.tasks.length} 个任务 · ${running} 运行中 · ${queued} 排队中`;
+    const timedOut = data.tasks.filter(task => task.status === "timed_out").length;
+    $("queue-summary").textContent = `${data.tasks.length} 个任务 · ${running} 运行中 · ${queued} 排队中 · ${timedOut} 超时`;
   } catch (error) {
     $("queue-summary").textContent = `刷新失败：${error.message}`;
   }

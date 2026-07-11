@@ -9,10 +9,12 @@ import json
 import os
 import queue
 import re
+import signal
 import shutil
 import subprocess
 import sys
 import threading
+import time
 import traceback
 import uuid
 from datetime import datetime, timezone
@@ -45,6 +47,14 @@ def _safe_name(value: str) -> str:
     return re.sub(r"[^\w\-. ]+", "_", value)[:80] or "audio"
 
 
+class TaskCancelled(RuntimeError):
+    """Raised inside the queue worker after a user-requested stop."""
+
+
+class TaskTimedOut(RuntimeError):
+    """Raised when a task exceeds the configured whole-pipeline deadline."""
+
+
 class TaskManager:
     """One durable queue, deliberately limited to one GPU pipeline at a time."""
 
@@ -60,6 +70,10 @@ class TaskManager:
         self.record_pending: "queue.Queue[tuple[str, str]]" = queue.Queue()
         self.port: Optional[int] = None
         self.allowed_roots: list[Path] = []
+        self.task_timeout_seconds = 3600.0
+        self.cancel_requested: set[str] = set()
+        self.active_processes: dict[str, subprocess.Popen] = {}
+        self.deadlines: dict[str, Optional[float]] = {}
         self._load_existing()
         threading.Thread(target=self._worker_loop, name="drumlab-task-worker", daemon=True).start()
         threading.Thread(target=self._record_worker_loop, name="drumlab-record-worker", daemon=True).start()
@@ -69,8 +83,16 @@ class TaskManager:
         port: int,
         allowed_roots: Optional[list[str]] = None,
         output_root: Optional[str] = None,
+        task_timeout_seconds: float = 3600,
     ) -> None:
         self.port = int(port)
+        try:
+            timeout = float(task_timeout_seconds)
+        except (TypeError, ValueError):
+            raise ValueError("Task timeout must be a number of seconds") from None
+        if timeout < 0:
+            raise ValueError("Task timeout cannot be negative; use 0 to disable it")
+        self.task_timeout_seconds = timeout
         self.allowed_roots = []
         for value in allowed_roots or []:
             self.allowed_roots.append(Path(value).expanduser().resolve(strict=True))
@@ -80,6 +102,7 @@ class TaskManager:
             target.mkdir(parents=True, exist_ok=True)
             if not target.is_dir():
                 raise ValueError(f"Task output root is not a directory: {target}")
+            self._verify_output_root(target)
             if target != self.root:
                 # configure() runs before Uvicorn starts accepting requests, so it is
                 # safe to switch the durable store and rebuild the in-memory index.
@@ -87,6 +110,25 @@ class TaskManager:
                     self.root = target
                     self.tasks.clear()
                     self._load_existing()
+
+    @staticmethod
+    def _verify_output_root(root: Path) -> None:
+        """Prove the service can create task directories, not merely see the mount."""
+        probe = root / f".drumlab-write-test-{uuid.uuid4().hex}"
+        marker = probe / "write-test"
+        try:
+            probe.mkdir()
+            marker.write_text("ok", encoding="utf-8")
+        except OSError as exc:
+            raise ValueError(
+                f"Task output root is not writable by the DrumLab process: {root} ({exc})"
+            ) from exc
+        finally:
+            try:
+                marker.unlink(missing_ok=True)
+                probe.rmdir()
+            except OSError:
+                pass
 
     def _load_existing(self) -> None:
         for path in self.root.glob("*/task.json"):
@@ -189,6 +231,7 @@ class TaskManager:
             "duration": None,
             "tempo": None,
             "hit_counts": None,
+            "timeout_seconds": self.task_timeout_seconds,
             "options": {
                 "model": model,
                 "device": device,
@@ -223,6 +266,35 @@ class TaskManager:
             )
             return [self._public(task) for task in ordered[:limit]]
 
+    def stop(self, task_id: str) -> dict[str, Any]:
+        """Cancel a queued task or terminate the active task's whole process group."""
+        with self.lock:
+            task = self.tasks.get(task_id)
+            if task is None:
+                raise KeyError(task_id)
+            if task.get("status") in ("completed", "failed", "cancelled", "timed_out"):
+                return self._public(task)
+            self.cancel_requested.add(task_id)
+            process = self.active_processes.get(task_id)
+            if task.get("status") == "queued":
+                task.update({
+                    "status": "cancelled",
+                    "stage": "cancelled",
+                    "message": "Task cancelled before it started",
+                    "error": None,
+                    "updated_at": _now(),
+                })
+            else:
+                task.update({
+                    "stage": "stopping",
+                    "message": "Stopping task and child processes ...",
+                    "updated_at": _now(),
+                })
+            self._write(task)
+        if process is not None:
+            self._terminate_process_tree(process)
+        return self.get(task_id)
+
     def _update(self, task_id: str, **changes: Any) -> None:
         with self.lock:
             task = self.tasks[task_id]
@@ -236,13 +308,59 @@ class TaskManager:
             handle.write(f"[{_now()}] {message}\n")
         self._update(task_id, message=message)
 
+    def _check_abort(self, task_id: str) -> None:
+        with self.lock:
+            if task_id in self.cancel_requested:
+                raise TaskCancelled("Task stopped by user")
+            deadline = self.deadlines.get(task_id)
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TaskTimedOut("Task exceeded its configured timeout")
+
+    def _remaining_timeout(self, task_id: str) -> Optional[float]:
+        with self.lock:
+            deadline = self.deadlines.get(task_id)
+        if deadline is None:
+            return None
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TaskTimedOut("Task exceeded its configured timeout")
+        return remaining
+
+    @staticmethod
+    def _terminate_process_tree(process: subprocess.Popen) -> None:
+        if process.poll() is not None:
+            return
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(process.pid)],
+                capture_output=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            return
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+            process.wait(timeout=5)
+        except ProcessLookupError:
+            return
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
     def _run(self, task_id: str, cmd: list[str], stage: str, progress: float) -> None:
+        self._check_abort(task_id)
         self._update(task_id, stage=stage, progress=progress)
         self._log(task_id, "Running: " + " ".join(cmd))
         kwargs: dict[str, Any] = {}
         if os.name == "nt":
-            kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        result = subprocess.run(
+            kwargs["creationflags"] = (
+                getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            )
+        else:
+            kwargs["start_new_session"] = True
+        process = subprocess.Popen(
             cmd,
             cwd=str(self.app_dir),
             stdout=subprocess.PIPE,
@@ -251,26 +369,65 @@ class TaskManager:
             errors="replace",
             **kwargs,
         )
-        (self.root / task_id / "pipeline.log").open("a", encoding="utf-8").write(result.stdout[-12000:])
-        if result.returncode:
-            raise RuntimeError(f"{stage} failed (exit {result.returncode}): {result.stdout[-800:]}")
+        with self.lock:
+            self.active_processes[task_id] = process
+        output = ""
+        try:
+            try:
+                # Close the race where stop() lands after Popen but before the
+                # process is registered in active_processes.
+                self._check_abort(task_id)
+                output, _ = process.communicate(timeout=self._remaining_timeout(task_id))
+            except subprocess.TimeoutExpired:
+                self._terminate_process_tree(process)
+                output, _ = process.communicate()
+                raise TaskTimedOut("Task exceeded its configured timeout") from None
+            except (TaskCancelled, TaskTimedOut):
+                self._terminate_process_tree(process)
+                output, _ = process.communicate()
+                raise
+        finally:
+            with self.lock:
+                if self.active_processes.get(task_id) is process:
+                    self.active_processes.pop(task_id, None)
+        with (self.root / task_id / "pipeline.log").open("a", encoding="utf-8") as handle:
+            handle.write((output or "")[-12000:])
+        self._check_abort(task_id)
+        if process.returncode:
+            raise RuntimeError(f"{stage} failed (exit {process.returncode}): {(output or '')[-800:]}")
 
     def _worker_loop(self) -> None:
         while True:
             task_id = self.pending.get()
             try:
+                if self.tasks.get(task_id, {}).get("status") == "cancelled":
+                    continue
                 self._process(task_id)
+            except TaskCancelled as exc:
+                self._update(task_id, status="cancelled", stage="cancelled", error=None,
+                             message=str(exc))
+            except TaskTimedOut as exc:
+                self._update(task_id, status="timed_out", stage="timed_out", error=str(exc),
+                             message=str(exc))
             except Exception as exc:  # noqa: BLE001
                 folder = self.root / task_id
                 (folder / "pipeline.log").open("a", encoding="utf-8").write("\n" + traceback.format_exc())
                 self._update(task_id, status="failed", stage="failed", error=str(exc), message=str(exc))
             finally:
+                with self.lock:
+                    self.active_processes.pop(task_id, None)
+                    self.deadlines.pop(task_id, None)
+                    self.cancel_requested.discard(task_id)
                 self.pending.task_done()
 
     def _process(self, task_id: str) -> None:
         task = self.tasks[task_id]
         folder = self.root / task_id
         opts = task["options"]
+        timeout = float(task.get("timeout_seconds", self.task_timeout_seconds))
+        with self.lock:
+            self.deadlines[task_id] = time.monotonic() + timeout if timeout > 0 else None
+        self._check_abort(task_id)
         self._update(task_id, status="running", stage="ingest", progress=0.02, error=None)
 
         input_wav = folder / "input.wav"
@@ -317,6 +474,7 @@ class TaskManager:
         )
 
         self._update(task_id, stage="notation", progress=0.88)
+        self._check_abort(task_id)
         meta = json.loads((acts_dir / "meta.json").read_text(encoding="utf-8"))
         events = self._pick_events(acts_dir / "activations.npy", opts["thresholds"], opts["fps"])
         payload = {
@@ -331,6 +489,7 @@ class TaskManager:
         (folder / "events.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         self._build_musicxml(events, float(meta["tempo"]), opts["grid"], folder / "score.musicxml")
         self._build_midi(events, float(meta["tempo"]), folder / "performance.mid")
+        self._check_abort(task_id)
 
         self._update(
             task_id,
