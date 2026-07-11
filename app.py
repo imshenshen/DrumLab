@@ -1498,6 +1498,9 @@ def main() -> None:
     ap.add_argument("--task-root", action="append", default=[], metavar="FOLDER",
                     help="Restrict agent task audio paths to this folder (repeatable). "
                          "If omitted, any readable absolute audio path is accepted.")
+    ap.add_argument("--task-output-root", default=None, metavar="FOLDER",
+                    help="Directory for persistent task folders and generated artifacts "
+                         "(default: DrumLab/workdir/tasks).")
     args = ap.parse_args()
 
     if args.preload:
@@ -1507,9 +1510,9 @@ def main() -> None:
         args.port = _first_free_port(args.host, 8765)
 
     try:
-        TASKS.configure(args.port, args.task_root)
-    except (OSError, RuntimeError) as exc:
-        raise SystemExit(f"Invalid --task-root: {exc}") from exc
+        TASKS.configure(args.port, args.task_root, args.task_output_root)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise SystemExit(f"Invalid task path configuration: {exc}") from exc
 
     for root in args.library:
         try:

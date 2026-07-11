@@ -64,11 +64,29 @@ class TaskManager:
         threading.Thread(target=self._worker_loop, name="drumlab-task-worker", daemon=True).start()
         threading.Thread(target=self._record_worker_loop, name="drumlab-record-worker", daemon=True).start()
 
-    def configure(self, port: int, allowed_roots: Optional[list[str]] = None) -> None:
+    def configure(
+        self,
+        port: int,
+        allowed_roots: Optional[list[str]] = None,
+        output_root: Optional[str] = None,
+    ) -> None:
         self.port = int(port)
         self.allowed_roots = []
         for value in allowed_roots or []:
             self.allowed_roots.append(Path(value).expanduser().resolve(strict=True))
+
+        if output_root:
+            target = Path(output_root).expanduser().resolve(strict=False)
+            target.mkdir(parents=True, exist_ok=True)
+            if not target.is_dir():
+                raise ValueError(f"Task output root is not a directory: {target}")
+            if target != self.root:
+                # configure() runs before Uvicorn starts accepting requests, so it is
+                # safe to switch the durable store and rebuild the in-memory index.
+                with self.lock:
+                    self.root = target
+                    self.tasks.clear()
+                    self._load_existing()
 
     def _load_existing(self) -> None:
         for path in self.root.glob("*/task.json"):

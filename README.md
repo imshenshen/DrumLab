@@ -132,6 +132,7 @@ This starts the server on `127.0.0.1:8765` and opens it in your default browser.
 | `--preload` | download all Demucs models, then exit |
 | `--library FOLDER` | index a folder for the song library / party shuffle (repeatable) |
 | `--task-root FOLDER` | restrict agent-supplied audio paths to this folder (repeatable) |
+| `--task-output-root FOLDER` | store persistent task folders and generated artifacts here |
 
 > **Song library.** The party-shuffle / up-next browser indexes folders you point it at.
 > Pass `--library FOLDER` (repeatable) to index one or more folders at startup — e.g.
@@ -148,8 +149,21 @@ This starts the server on `127.0.0.1:8765` and opens it in your default browser.
 ## Agent tasks and dynamic scores
 
 The task API is separate from the legacy shared GUI workspace. Tasks are persistent under
-`workdir/tasks/<task-id>`, and the GPU pipeline is intentionally single-file so concurrent
+`workdir/tasks/<task-id>` by default, or under `<task-output-root>/<task-id>` when
+`--task-output-root` is supplied. The GPU pipeline is intentionally single-file so concurrent
 agents cannot start competing Demucs/ADTOF processes.
+
+Example with separate input and output locations:
+
+```sh
+python app.py --host 0.0.0.0 --port 8765 --no-browser \
+  --task-root /home/shenshen/runclave-inputs \
+  --task-output-root /home/shenshen/runclave-outputs
+```
+
+`--task-root` controls which source audio files agents may read. `--task-output-root`
+controls where DrumLab writes task metadata, logs, decoded audio, stems, activation caches,
+MusicXML, MIDI, and silent recordings.
 
 Create a task from an absolute path that exists **on the DrumLab server**:
 
