@@ -1436,7 +1436,11 @@ class TaskManager:
                 timestamp,
                 target_scroll,
                 sheet_x + float(point["x"]),
-                sheet_origin_y + float(point["y"]),
+                # OSMD's cursor box becomes taller for simultaneous high/low
+                # drum notes. Anchor our fixed-size cursor to its bottom so its
+                # top does not suddenly jump upward on those chords.
+                sheet_origin_y + float(point["y"]) + float(point.get("height", cursor_height))
+                - cursor_height,
             ))
         samples.sort(key=lambda item: item[0])
         collapsed_samples: list[tuple[float, float, float, float]] = []
