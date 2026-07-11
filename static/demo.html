@@ -83,6 +83,9 @@
         <label>量化网格<select id="grid"><option>1/16</option><option>1/8</option><option>1/16T</option><option>1/32</option></select></label>
         <label>每小节拍数<input id="beats-per-measure" type="number" min="1" max="32" value="4"></label>
         <label>以几分音符为一拍<select id="beat-unit"><option>1</option><option>2</option><option selected>4</option><option>8</option><option>16</option><option>32</option></select></label>
+        <label>每行小节数<input id="measures-per-system" type="number" min="1" max="6" value="3"></label>
+        <label>弱起处理<select id="pickup-mode"><option value="auto">自动检测</option><option value="none">无弱起</option><option value="manual">手动</option></select></label>
+        <label>弱起拍数<input id="pickup-beats" type="number" min="0" max="31" step="0.25" value="0" disabled></label>
         <label>ADTOF FPS<input id="fps" type="number" min="25" max="200" value="100"></label>
       </div>
       <details class="thresholds">
@@ -193,7 +196,9 @@ function taskRow(task) {
   const sourceLabel = task.options?.source_mode === "drum_only" ? "drum only" : esc(task.options?.model);
   const timeoutLabel = Number(task.timeout_seconds) > 0 ? `${task.timeout_seconds}s timeout` : "no timeout";
   const meter = `${task.options?.beats_per_measure || 4}/${task.options?.beat_unit || 4}`;
-  options.append(el("div", "", `${sourceLabel} · ${esc(task.options?.device)}`), el("div", "stage", `${meter} · 网格 ${esc(task.options?.grid)} · ${esc(task.options?.fps)} FPS · ${timeoutLabel}`));
+  const pickup = Number(task.options?.pickup_beats || 0);
+  const pickupLabel = pickup > 0 ? `弱起 ${pickup} 拍` : "无弱起";
+  options.append(el("div", "", `${sourceLabel} · ${esc(task.options?.device)}`), el("div", "stage", `${meter} · ${pickupLabel} · 网格 ${esc(task.options?.grid)} · ${task.options?.measures_per_system || 3} 小节/行 · ${esc(task.options?.fps)} FPS · ${timeoutLabel}`));
 
   const result = document.createElement("td");
   if (task.status === "completed") {
@@ -269,6 +274,8 @@ $("task-form").addEventListener("submit", async event => {
         model:$("model").value, device:$("device").value, source_mode:$("source-mode").value,
         grid:$("grid").value,
         beats_per_measure:Number($("beats-per-measure").value), beat_unit:Number($("beat-unit").value),
+        measures_per_system:Number($("measures-per-system").value),
+        pickup_mode:$("pickup-mode").value, pickup_beats:Number($("pickup-beats").value),
         fps:Number($("fps").value), thresholds,
       }),
     });
@@ -283,6 +290,9 @@ $("source-mode").addEventListener("change", event => {
   const drumOnly = event.target.value === "drum_only";
   $("model").disabled = drumOnly;
   $("model").title = drumOnly ? "纯鼓模式不会运行 Demucs" : "";
+});
+$("pickup-mode").addEventListener("change", event => {
+  $("pickup-beats").disabled = event.target.value !== "manual";
 });
 $("service-port").value = location.port || (location.protocol === "https:" ? 443 : 80);
 loadTasks();

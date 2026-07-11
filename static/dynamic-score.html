@@ -9,7 +9,7 @@
   :root { --bg:#101216; --panel:#1d2026; --line:#303540; --text:#e5e8ee; --dim:#9299a8; --blue:#4ea1ff; --green:#2f9e57; }
   * { box-sizing:border-box; }
   html,body { margin:0; width:100%; height:100%; overflow:hidden; background:var(--bg); color:var(--text); font:14px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif; }
-  body { display:grid; grid-template-rows:auto auto 1fr; }
+  body { display:grid; grid-template-rows:auto auto auto 1fr; }
   header { display:flex; align-items:center; gap:14px; min-height:54px; padding:8px 18px; background:var(--panel); border-bottom:1px solid var(--line); }
   h1 { margin:0; color:var(--blue); font-size:15px; letter-spacing:2px; text-transform:uppercase; }
   #title { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--dim); }
@@ -22,13 +22,18 @@
   input[type=range] { width:100%; accent-color:var(--blue); }
   #clock { font:13px ui-monospace,SFMono-Regular,Consolas,monospace; min-width:102px; text-align:right; }
   select { color:var(--text); background:#252932; border:1px solid var(--line); border-radius:4px; padding:6px; }
+  #notation-controls { display:flex; align-items:center; gap:10px; padding:7px 18px; background:#20232a; border-bottom:1px solid var(--line); }
+  #notation-controls label { display:flex; align-items:center; gap:6px; color:var(--dim); }
+  #notation-controls input { width:76px; color:var(--text); background:#252932; border:1px solid var(--line); border-radius:4px; padding:6px; }
+  #notation-save { padding:7px 14px; background:var(--blue); }
+  #notation-status { color:var(--dim); font-size:12px; }
   #viewport { overflow:auto; background:#d9dce2; scroll-behavior:smooth; position:relative; }
   #sheet-wrap { width:calc(100% - 28px); max-width:none; min-height:calc((100vw - 28px) * 1.4142); margin:14px auto; padding:22px 28px 60px; background:#fff; box-shadow:0 3px 20px #0005; }
   #sheet { color:#000; }
   #message { position:absolute; inset:0; display:grid; place-items:center; padding:30px; text-align:center; color:var(--dim); background:var(--bg); z-index:5; }
   #message.hidden { display:none; }
   body.recording { grid-template-rows:1fr; }
-  body.recording header, body.recording #controls { display:none; }
+  body.recording header, body.recording #controls, body.recording #notation-controls { display:none; }
   body.recording #viewport { grid-row:1; }
   body.recording #sheet-wrap { width:calc(100% - 24px); max-width:none; margin:12px auto; padding:18px 22px 45px; }
   @media (max-width:700px) {
@@ -52,6 +57,13 @@
   <span id="clock">00:00 / 00:00</span>
   <label id="speed">Speed <select><option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option></select></label>
   <label id="paper-size">A4 显示 <select><option value="fit">适应窗口</option><option value="small">小</option><option value="medium" selected>中</option><option value="large">大</option></select></label>
+</div>
+<div id="notation-controls">
+  <label>弱起 <select id="pickup-mode"><option value="auto">自动检测</option><option value="none">无弱起</option><option value="manual">手动</option></select></label>
+  <label>拍数 <input id="pickup-beats" type="number" min="0" step="0.25" value="0"></label>
+  <label>每行 <input id="measures-per-system" type="number" min="1" max="6" value="3"> 小节</label>
+  <button id="notation-save" type="button" disabled>保存谱面设置</button>
+  <span id="notation-status"></span>
 </div>
 <main id="viewport">
   <div id="message">Waiting for the task…</div>
@@ -210,6 +222,28 @@ async function applyPaperSize() {
   placeCursor(audio.currentTime || 0, true);
 }
 $("paper-size").querySelector("select").addEventListener("change", applyPaperSize);
+function syncPickupInput() {
+  $("pickup-beats").disabled = $("pickup-mode").value !== "manual";
+}
+$("pickup-mode").addEventListener("change", syncPickupInput);
+$("notation-save").addEventListener("click", async () => {
+  const button = $("notation-save"), noteStatus = $("notation-status");
+  button.disabled = true; noteStatus.textContent = "正在重新生成 MusicXML…";
+  try {
+    await json(`/api/tasks/${encodeURIComponent(taskId)}/notation`, {
+      method:"PATCH", headers:{"content-type":"application/json"},
+      body:JSON.stringify({
+        pickup_mode:$("pickup-mode").value,
+        pickup_beats:Number($("pickup-beats").value),
+        measures_per_system:Number($("measures-per-system").value),
+      }),
+    });
+    noteStatus.textContent = "已保存，正在重新载入谱面…";
+    location.reload();
+  } catch (error) {
+    noteStatus.textContent = error.message; button.disabled = false;
+  }
+});
 audio.addEventListener("ended", () => {
   play.textContent = "Play";
   window.__DRUMLAB_SCORE_FINISHED__ = true;
@@ -219,6 +253,17 @@ audio.addEventListener("ended", () => {
 (async () => {
   try {
     const task = await waitForTask();
+    const options = task.options || {};
+    $("pickup-mode").value = options.pickup_mode || "auto";
+    $("pickup-beats").value = String(options.pickup_beats || 0);
+    $("pickup-beats").max = String(Math.max(0, Number(options.beats_per_measure || 4) - 0.01));
+    $("measures-per-system").value = String(options.measures_per_system || 3);
+    syncPickupInput();
+    const confidence = options.pickup_confidence;
+    $("notation-status").textContent = options.pickup_mode === "auto" && confidence != null
+      ? `自动检测置信度 ${Math.round(Number(confidence) * 100)}%`
+      : "";
+    $("notation-save").disabled = recordingMode;
     meta = await json(`/api/tasks/${encodeURIComponent(taskId)}/events`);
     const xmlResponse = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/musicxml`);
     if (!xmlResponse.ok) throw new Error("Could not load MusicXML");

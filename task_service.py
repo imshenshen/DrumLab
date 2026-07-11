@@ -38,7 +38,7 @@ STAFF_MAP = {
     "hihat": ("G", 5, "x"),
     "cymbal": ("A", 5, "x"),
 }
-SCORE_VERSION = 3  # v3 persists the requested time signature in MusicXML
+SCORE_VERSION = 5  # v5 adds persisted pickup/anacrusis notation
 
 
 def _now() -> str:
@@ -199,6 +199,9 @@ class TaskManager:
         grid: str = "1/16",
         beats_per_measure: int = 4,
         beat_unit: int = 4,
+        measures_per_system: int = 3,
+        pickup_mode: str = "auto",
+        pickup_beats: float = 0.0,
         fps: int = 100,
         thresholds: Optional[dict[str, float]] = None,
     ) -> dict[str, Any]:
@@ -212,6 +215,17 @@ class TaskManager:
             raise ValueError("beats_per_measure must be between 1 and 32")
         if beat_unit not in (1, 2, 4, 8, 16, 32):
             raise ValueError("beat_unit must be one of 1, 2, 4, 8, 16, or 32")
+        measure_quarter_length = Fraction(beats_per_measure * 4, beat_unit)
+        if (measure_quarter_length / GRID_Q[grid]).denominator != 1:
+            raise ValueError("grid must divide the selected time signature into whole slots")
+        measures_per_system = int(measures_per_system)
+        if not 1 <= measures_per_system <= 6:
+            raise ValueError("measures_per_system must be between 1 and 6")
+        if pickup_mode not in ("none", "manual", "auto"):
+            raise ValueError("pickup_mode must be none, manual, or auto")
+        pickup_beats = float(pickup_beats)
+        if pickup_beats < 0 or pickup_beats >= beats_per_measure:
+            raise ValueError("pickup_beats must be at least 0 and less than beats_per_measure")
         if device not in ("cuda", "cpu"):
             raise ValueError("device must be cuda or cpu")
         if source_mode not in ("full_mix", "drum_only"):
@@ -249,6 +263,10 @@ class TaskManager:
                 "grid": grid,
                 "beats_per_measure": beats_per_measure,
                 "beat_unit": beat_unit,
+                "measures_per_system": measures_per_system,
+                "pickup_mode": pickup_mode,
+                "pickup_beats": pickup_beats if pickup_mode == "manual" else 0.0,
+                "pickup_confidence": None,
                 "fps": int(fps),
                 "thresholds": merged_thresholds,
             },
@@ -265,7 +283,14 @@ class TaskManager:
             task = self.tasks.get(task_id)
             if task is None:
                 raise KeyError(task_id)
-            return self._public(task)
+            needs_upgrade = (
+                task.get("status") == "completed"
+                and int(task.get("score_version") or 0) < SCORE_VERSION
+            )
+        if needs_upgrade:
+            self._upgrade_musicxml(task_id)
+        with self.lock:
+            return self._public(self.tasks[task_id])
 
     def list(self, limit: int = 100) -> list[dict[str, Any]]:
         """Newest-first task snapshot for the demo/operations queue."""
@@ -489,6 +514,17 @@ class TaskManager:
         self._check_abort(task_id)
         meta = json.loads((acts_dir / "meta.json").read_text(encoding="utf-8"))
         events = self._pick_events(acts_dir / "activations.npy", opts["thresholds"], opts["fps"])
+        pickup_beats, pickup_confidence = self._resolve_pickup(
+            events,
+            float(meta["tempo"]),
+            opts["grid"],
+            opts.get("beats_per_measure", 4),
+            opts.get("beat_unit", 4),
+            opts.get("pickup_mode", "auto"),
+            opts.get("pickup_beats", 0.0),
+        )
+        opts["pickup_beats"] = pickup_beats
+        opts["pickup_confidence"] = pickup_confidence
         payload = {
             "task_id": task_id,
             "tempo": float(meta["tempo"]),
@@ -496,6 +532,10 @@ class TaskManager:
             "grid": opts["grid"],
             "beats_per_measure": opts.get("beats_per_measure", 4),
             "beat_unit": opts.get("beat_unit", 4),
+            "measures_per_system": opts.get("measures_per_system", 3),
+            "pickup_mode": opts.get("pickup_mode", "auto"),
+            "pickup_beats": pickup_beats,
+            "pickup_confidence": pickup_confidence,
             "thresholds": opts["thresholds"],
             "events": events,
             "counts": {name: len(values) for name, values in events.items()},
@@ -509,6 +549,8 @@ class TaskManager:
             duration_seconds=float(meta["duration"]),
             beats_per_measure=opts.get("beats_per_measure", 4),
             beat_unit=opts.get("beat_unit", 4),
+            measures_per_system=opts.get("measures_per_system", 3),
+            pickup_beats=pickup_beats,
         )
         self._build_midi(events, float(meta["tempo"]), folder / "performance.mid")
         self._check_abort(task_id)
@@ -552,6 +594,70 @@ class TaskManager:
             result[name] = [(slot, slot * step_sec) for slot in slots]
         return result
 
+    @staticmethod
+    def _pickup_slots(pickup_beats: float, beats_per_measure: int, slots_per_measure: int) -> tuple[int, float]:
+        slots = round(float(pickup_beats) * slots_per_measure / beats_per_measure)
+        slots = max(0, min(slots_per_measure - 1, slots))
+        effective_beats = slots * beats_per_measure / slots_per_measure
+        return slots, round(effective_beats, 6)
+
+    def _resolve_pickup(
+        self,
+        events: dict[str, list[float]],
+        tempo: float,
+        grid: str,
+        beats_per_measure: int,
+        beat_unit: int,
+        pickup_mode: str,
+        pickup_beats: float,
+    ) -> tuple[float, Optional[float]]:
+        measure_quarter_length = Fraction(beats_per_measure * 4, beat_unit)
+        slots_per_measure = int(measure_quarter_length / GRID_Q[grid])
+        if pickup_mode == "none":
+            return 0.0, None
+        if pickup_mode == "manual":
+            _, effective = self._pickup_slots(pickup_beats, beats_per_measure, slots_per_measure)
+            return effective, None
+
+        quantized = self._quantize(events, tempo, grid)
+        slots_by_class = {name: [slot for slot, _ in rows] for name, rows in quantized.items()}
+        all_slots = [slot for slots in slots_by_class.values() for slot in slots]
+        if len(all_slots) < 8:
+            return 0.0, 0.0
+
+        # Score each possible bar phase. Kick/cymbal accents are strongest on a
+        # downbeat; in 4/4, snare backbeats add useful evidence. This is deliberately
+        # conservative: ambiguous material remains non-pickup and can be corrected in UI.
+        downbeat_weights = {"kick": 4.0, "cymbal": 3.0, "tom": 1.2, "snare": 0.5, "hihat": 0.2}
+        scores: list[tuple[float, int]] = []
+        for candidate in range(slots_per_measure):
+            if candidate and not any(slot < candidate for slot in all_slots):
+                continue
+            score = 0.0
+            for name, slots in slots_by_class.items():
+                for slot in slots:
+                    position = (slot - candidate) % slots_per_measure
+                    if position == 0:
+                        score += downbeat_weights[name]
+                    if beats_per_measure == 4 and name == "snare":
+                        if position in (slots_per_measure // 4, slots_per_measure * 3 // 4):
+                            score += 2.2
+                    if beats_per_measure == 4 and name == "kick" and position == slots_per_measure // 2:
+                        score += 1.0
+            scores.append((score, candidate))
+        scores.sort(reverse=True)
+        best_score, best_slot = scores[0]
+        second_score = scores[1][0] if len(scores) > 1 else 0.0
+        confidence = max(0.0, min(1.0, (best_score - second_score) / max(best_score, 1.0)))
+        if best_slot == 0 or confidence < 0.08:
+            return 0.0, round(confidence, 4)
+        _, effective = self._pickup_slots(
+            best_slot * beats_per_measure / slots_per_measure,
+            beats_per_measure,
+            slots_per_measure,
+        )
+        return effective, round(confidence, 4)
+
     def _build_musicxml(
         self,
         events: dict[str, list[float]],
@@ -561,8 +667,10 @@ class TaskManager:
         duration_seconds: Optional[float] = None,
         beats_per_measure: int = 4,
         beat_unit: int = 4,
+        measures_per_system: int = 3,
+        pickup_beats: float = 0.0,
     ) -> None:
-        from music21 import clef, duration as m21dur, meter, note, percussion, stream, tempo as m21tempo
+        from music21 import clef, duration as m21dur, layout, meter, note, percussion, stream, tempo as m21tempo
 
         frac = GRID_Q[grid]
         by_offset: dict[int, set[str]] = {}
@@ -579,29 +687,55 @@ class TaskManager:
                 value.notehead = head
             return value
 
+        measure_quarter_length = Fraction(beats_per_measure * 4, beat_unit)
+        slots_per_measure_fraction = measure_quarter_length / frac
+        if slots_per_measure_fraction.denominator != 1:
+            raise ValueError("grid must divide the selected time signature into whole slots")
+        slots_per_measure = int(slots_per_measure_fraction)
+        pickup_slots, _ = self._pickup_slots(pickup_beats, beats_per_measure, slots_per_measure)
+        step_seconds = float(frac) * 60.0 / float(tempo)
+        source_slots = int(math.ceil(float(duration_seconds or 0) / step_seconds))
+        event_slots = max(by_offset, default=-1) + 1
+        total_slots = max(1, source_slots, event_slots)
+        remaining_slots = max(0, total_slots - pickup_slots)
+        full_measure_count = max(1, int(math.ceil(remaining_slots / slots_per_measure)))
+
+        # Build complete measures explicitly. Relying on music21 to infer measures
+        # from sparse absolute offsets can create an irregular pickup-like first bar
+        # and makes cursor timing depend on the final detected hit.
         part = stream.Part()
         part.partName = "Drums"
-        part.insert(0, clef.PercussionClef())
-        part.insert(0, meter.TimeSignature(f"{beats_per_measure}/{beat_unit}"))
-        part.insert(0, m21tempo.MetronomeMark(number=round(tempo, 2)))
-        for slot in sorted(by_offset):
-            names = sorted(by_offset[slot])
-            element = unpitched(names[0]) if len(names) == 1 else percussion.PercussionChord([unpitched(n) for n in names])
-            element.duration = m21dur.Duration(frac)
-            part.insert(Fraction(slot) * frac, element)
+        measure_specs: list[tuple[int, int, int, bool]] = []
+        if pickup_slots:
+            measure_specs.append((0, 0, pickup_slots, True))
+        for full_index in range(full_measure_count):
+            measure_specs.append((full_index + 1, pickup_slots + full_index * slots_per_measure, slots_per_measure, False))
 
-        # Sparse event insertion naturally ends the score at the final detected hit,
-        # which may be well before the source audio ends (outros and long rests are
-        # common). Insert a final grid-sized rest so MusicXML/OSMD retain the complete
-        # source timeline and the playback cursor cannot finish early.
-        if duration_seconds is not None and duration_seconds > 0:
-            step_seconds = float(frac) * 60.0 / float(tempo)
-            total_slots = max(1, int(math.ceil(float(duration_seconds) / step_seconds)))
-            final_slot = total_slots - 1
-            if final_slot not in by_offset:
-                tail = note.Rest()
-                tail.duration = m21dur.Duration(frac)
-                part.insert(Fraction(final_slot) * frac, tail)
+        for sequence_index, (measure_number, start_slot, slot_count, is_pickup) in enumerate(measure_specs):
+            measure = stream.Measure(number=measure_number)
+            if sequence_index == 0:
+                measure.insert(0, clef.PercussionClef())
+                measure.insert(0, meter.TimeSignature(f"{beats_per_measure}/{beat_unit}"))
+                measure.insert(0, m21tempo.MetronomeMark(number=round(tempo, 2)))
+            full_index = measure_number - 1
+            if not is_pickup and full_index > 0 and full_index % measures_per_system == 0:
+                measure.insert(0, layout.SystemLayout(isNew=True))
+
+            for local_slot in range(slot_count):
+                global_slot = start_slot + local_slot
+                names = sorted(by_offset.get(global_slot, ()))
+                if not names:
+                    element = note.Rest()
+                elif len(names) == 1:
+                    element = unpitched(names[0])
+                else:
+                    element = percussion.PercussionChord([unpitched(name) for name in names])
+                element.duration = m21dur.Duration(frac)
+                measure.insert(Fraction(local_slot) * frac, element)
+            if is_pickup:
+                measure.padAsAnacrusis()
+                measure.showNumber = stream.enums.ShowNumber.NEVER
+            part.append(measure)
         stream.Score([part]).write("musicxml", fp=str(path))
 
     @staticmethod
@@ -638,6 +772,17 @@ class TaskManager:
                 return
             folder = self.root / task_id
             payload = json.loads((folder / "events.json").read_text(encoding="utf-8"))
+            options = task.setdefault("options", {})
+            pickup_mode = payload.get("pickup_mode", options.get("pickup_mode", "auto"))
+            pickup_beats, pickup_confidence = self._resolve_pickup(
+                payload["events"],
+                float(payload["tempo"]),
+                payload.get("grid", options.get("grid", "1/16")),
+                int(payload.get("beats_per_measure", options.get("beats_per_measure", 4))),
+                int(payload.get("beat_unit", options.get("beat_unit", 4))),
+                pickup_mode,
+                float(payload.get("pickup_beats", options.get("pickup_beats", 0))),
+            )
             self._build_musicxml(
                 payload["events"],
                 float(payload["tempo"]),
@@ -646,10 +791,73 @@ class TaskManager:
                 duration_seconds=float(payload.get("duration") or task.get("duration") or 0),
                 beats_per_measure=int(payload.get("beats_per_measure", task.get("options", {}).get("beats_per_measure", 4))),
                 beat_unit=int(payload.get("beat_unit", task.get("options", {}).get("beat_unit", 4))),
+                measures_per_system=int(payload.get("measures_per_system", task.get("options", {}).get("measures_per_system", 3))),
+                pickup_beats=pickup_beats,
             )
+            options.update({
+                "pickup_mode": pickup_mode,
+                "pickup_beats": pickup_beats,
+                "pickup_confidence": pickup_confidence,
+                "measures_per_system": int(payload.get("measures_per_system", options.get("measures_per_system", 3))),
+            })
+            payload.update({
+                "pickup_mode": pickup_mode,
+                "pickup_beats": pickup_beats,
+                "pickup_confidence": pickup_confidence,
+                "measures_per_system": options["measures_per_system"],
+            })
+            (folder / "events.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
             task["score_version"] = SCORE_VERSION
             task["updated_at"] = _now()
             self._write(task)
+
+    def update_notation(self, task_id: str, params: dict[str, Any]) -> dict[str, Any]:
+        """Persist notation-only changes and rebuild MusicXML without GPU inference."""
+        with self.lock:
+            task = self.tasks.get(task_id)
+            if task is None:
+                raise KeyError(task_id)
+            if task.get("status") != "completed":
+                raise ValueError("Task must be completed before notation can be edited")
+            options = task["options"]
+            pickup_mode = params.get("pickup_mode", options.get("pickup_mode", "auto"))
+            pickup_beats_input = float(params.get("pickup_beats", options.get("pickup_beats", 0)))
+            measures_per_system = int(params.get("measures_per_system", options.get("measures_per_system", 3)))
+            if pickup_mode not in ("none", "manual", "auto"):
+                raise ValueError("pickup_mode must be none, manual, or auto")
+            if not 1 <= measures_per_system <= 6:
+                raise ValueError("measures_per_system must be between 1 and 6")
+            beats_per_measure = int(options.get("beats_per_measure", 4))
+            if pickup_beats_input < 0 or pickup_beats_input >= beats_per_measure:
+                raise ValueError("pickup_beats must be at least 0 and less than beats_per_measure")
+
+            folder = self.root / task_id
+            payload = json.loads((folder / "events.json").read_text(encoding="utf-8"))
+            pickup_beats, confidence = self._resolve_pickup(
+                payload["events"], float(payload["tempo"]), options.get("grid", "1/16"),
+                beats_per_measure, int(options.get("beat_unit", 4)), pickup_mode, pickup_beats_input,
+            )
+            temp_score = folder / "score.tmp.musicxml"
+            self._build_musicxml(
+                payload["events"], float(payload["tempo"]), options.get("grid", "1/16"), temp_score,
+                duration_seconds=float(payload.get("duration") or task.get("duration") or 0),
+                beats_per_measure=beats_per_measure, beat_unit=int(options.get("beat_unit", 4)),
+                measures_per_system=measures_per_system, pickup_beats=pickup_beats,
+            )
+            os.replace(temp_score, folder / "score.musicxml")
+            options.update({
+                "pickup_mode": pickup_mode, "pickup_beats": pickup_beats,
+                "pickup_confidence": confidence, "measures_per_system": measures_per_system,
+            })
+            payload.update({
+                "pickup_mode": pickup_mode, "pickup_beats": pickup_beats,
+                "pickup_confidence": confidence, "measures_per_system": measures_per_system,
+            })
+            (folder / "events.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            task["score_version"] = SCORE_VERSION
+            task["updated_at"] = _now()
+            self._write(task)
+            return self._public(task)
 
     @staticmethod
     def _video_dimensions(aspect_ratio: str, width: int, height: Optional[int]) -> tuple[int, int]:

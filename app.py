@@ -662,6 +662,9 @@ def create_task(params: dict):
             grid=params.get("grid", "1/16"),
             beats_per_measure=params.get("beats_per_measure", 4),
             beat_unit=params.get("beat_unit", 4),
+            measures_per_system=params.get("measures_per_system", 3),
+            pickup_mode=params.get("pickup_mode", "auto"),
+            pickup_beats=params.get("pickup_beats", 0),
             fps=params.get("fps", 100),
             thresholds=params.get("thresholds"),
         )
@@ -694,6 +697,16 @@ def stop_task(task_id: str):
         return TASKS.stop(task_id)
     except KeyError:
         raise HTTPException(404, "Task not found") from None
+
+
+@app.patch("/api/tasks/{task_id}/notation")
+def update_task_notation(task_id: str, params: dict):
+    try:
+        return TASKS.update_notation(task_id, params)
+    except KeyError:
+        raise HTTPException(404, "Task not found") from None
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
 
 
 def _task_artifact(task_id: str, name: str) -> Path:

@@ -198,6 +198,17 @@ produces a 6/8 score quantized to sixteenth-note positions. The time signature c
 measure structure, while `grid` independently controls the smallest timing snap. Tempo is
 still expressed as quarter-note BPM, matching the ADTOF estimate.
 
+`measures_per_system` controls printed score density and defaults to `3`. DrumLab writes
+explicit MusicXML system breaks, so the same number of measures per line is used in the
+dynamic page, A4 printing, and silent recordings.
+
+Pickup handling uses `pickup_mode`: `none`, `manual`, or `auto` (default). Manual mode uses
+`pickup_beats`; auto mode scores kick, snare, and cymbal bar phases and stores both the
+detected pickup length and confidence. On a completed task, the dynamic-score page can edit
+the pickup and measures-per-system settings and save them back. REST clients can call
+`PATCH /api/tasks/{task_id}/notation`; MCP clients use `update_drum_score_notation`. This
+rebuilds only MusicXML and does not rerun Demucs or ADTOF.
+
 The response contains a task ID and `queued` or `running` status. Poll
 `GET /api/tasks/{task_id}` until `completed`, then open `/tasks/{task_id}`. Artifacts are
 available from the URL map in the task response. The supplied `service_port` must match the
@@ -214,6 +225,7 @@ MCP clients connect to `http://HOST:PORT/mcp/` and receive these tools:
 - `create_drum_score_task`
 - `get_drum_score_task`
 - `stop_drum_score_task`
+- `update_drum_score_notation`
 - `create_dynamic_score_recording`
 - `get_dynamic_score_recording`
 

@@ -34,6 +34,9 @@ def build_mcp_http_app(task_manager) -> tuple[Any, Any]:
         grid: str = "1/16",
         beats_per_measure: int = 4,
         beat_unit: int = 4,
+        measures_per_system: int = 3,
+        pickup_mode: str = "auto",
+        pickup_beats: float = 0.0,
         fps: int = 100,
         thresholds: Optional[dict[str, float]] = None,
     ) -> dict[str, Any]:
@@ -47,6 +50,9 @@ def build_mcp_http_app(task_manager) -> tuple[Any, Any]:
             grid=grid,
             beats_per_measure=beats_per_measure,
             beat_unit=beat_unit,
+            measures_per_system=measures_per_system,
+            pickup_mode=pickup_mode,
+            pickup_beats=pickup_beats,
             fps=fps,
             thresholds=thresholds,
         )
@@ -60,6 +66,22 @@ def build_mcp_http_app(task_manager) -> tuple[Any, Any]:
     def stop_drum_score_task(task_id: str) -> dict[str, Any]:
         """Stop a queued/running score task and terminate its child process group."""
         return task_manager.stop(task_id)
+
+    @server.tool()
+    def update_drum_score_notation(
+        task_id: str,
+        service_port: int,
+        pickup_mode: str = "auto",
+        pickup_beats: float = 0.0,
+        measures_per_system: int = 3,
+    ) -> dict[str, Any]:
+        """Re-detect or manually set pickup notation and rebuild MusicXML without GPU work."""
+        task_manager._validate_port(service_port)
+        return task_manager.update_notation(task_id, {
+            "pickup_mode": pickup_mode,
+            "pickup_beats": pickup_beats,
+            "measures_per_system": measures_per_system,
+        })
 
     @server.tool()
     def create_dynamic_score_recording(
