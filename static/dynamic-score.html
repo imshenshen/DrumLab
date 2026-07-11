@@ -355,7 +355,11 @@ audio.addEventListener("ended", () => {
     const xml = await xmlResponse.text();
     osmd = new opensheetmusicdisplay.OpenSheetMusicDisplay("sheet", {
       autoResize: false, backend: "svg", drawTitle: false, drawPartNames: false,
-      followCursor: false, pageFormat: "A4_P", pageBackgroundColor: "#ffffff",
+      // Recording needs one continuous score. A4_P clips long pieces at the
+      // first page boundary while the cursor continues into the empty canvas.
+      // Keep A4 pagination for the interactive/print view only.
+      followCursor: false, pageFormat: recordingMode ? "Endless" : "A4_P",
+      pageBackgroundColor: "#ffffff",
       newSystemFromXML: true,
     });
     await osmd.load(xml);
