@@ -39,6 +39,7 @@
     position:fixed; inset:0; width:100%; height:100%;
     grid-row:1; background:#fff;
   }
+  body.recording.offline #viewport { scroll-behavior:auto; }
   body.recording #sheet-wrap { width:calc(100% - 24px); max-width:none; margin:12px auto; padding:18px 22px 45px; }
   /* OSMD's cursor lives outside the SVG and can advance beyond an A4-sized SVG
      viewport. Let the engraved SVG content remain visible in the continuous
@@ -98,6 +99,7 @@ const offlineRecordingMode = recordingKind === "offline";
 if (recordingMode) {
   document.documentElement.classList.add("recording");
   document.body.classList.add("recording");
+  if (offlineRecordingMode) document.body.classList.add("offline");
 }
 const $ = id => document.getElementById(id);
 const audio = $("audio"), play = $("play"), stop = $("stop"), seek = $("seek");

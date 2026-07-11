@@ -1363,8 +1363,22 @@ class TaskManager:
             if not tile_tops or tile_tops[-1] != max_scroll:
                 tile_tops.append(max_scroll)
             for tile_top in tile_tops:
-                page.evaluate("top => { document.getElementById('viewport').scrollTop = top; }", tile_top)
-                page.wait_for_timeout(20)
+                actual_top = page.evaluate(
+                    """top => {
+                        const viewport = document.getElementById('viewport');
+                        viewport.style.scrollBehavior = 'auto';
+                        viewport.scrollTo(0, top);
+                        return viewport.scrollTop;
+                    }""",
+                    tile_top,
+                )
+                if abs(float(actual_top) - tile_top) > 1.0:
+                    raise RuntimeError(
+                        f"Score tile scroll mismatch: requested {tile_top}, got {actual_top}"
+                    )
+                page.evaluate(
+                    "() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))"
+                )
                 page_png = folder / f"score-tile-{tile_top}.png"
                 page.locator("#viewport").screenshot(path=str(page_png))
                 page_pngs.append(page_png)
