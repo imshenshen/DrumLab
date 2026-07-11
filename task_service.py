@@ -1205,7 +1205,6 @@ class TaskManager:
         height: Optional[int] = None,
         paper_size: str = "fit",
         fps: int = 30,
-        render_mode: str = "offline",
     ) -> dict[str, Any]:
         self._validate_port(service_port)
         task = self.get(task_id)
@@ -1214,11 +1213,8 @@ class TaskManager:
         if paper_size not in ("fit", "small", "medium", "large"):
             raise ValueError("paper_size must be fit, small, medium, or large")
         fps = max(12, min(60, int(fps)))
-        if render_mode not in ("offline", "realtime"):
-            raise ValueError("render_mode must be offline or realtime")
         self._validate_recording_browser()
-        if render_mode == "offline":
-            self._validate_offline_renderer()
+        self._validate_offline_renderer()
         width, height = self._video_dimensions(aspect_ratio, width, height)
         recording_id = uuid.uuid4().hex
         recording = {
@@ -1229,7 +1225,8 @@ class TaskManager:
             "paper_format": "A4_P",
             "paper_size": paper_size,
             "fps": fps,
-            "render_mode": render_mode,
+            "container": "mp4",
+            "video_codec": "h264_nvenc",
             "progress": 0.0,
             "created_at": _now(),
             "updated_at": _now(),
@@ -1283,6 +1280,15 @@ class TaskManager:
             raise ValueError("Offline recording requires Pillow. Run: pip install Pillow")
         if not shutil.which("ffmpeg"):
             raise ValueError("Offline recording requires FFmpeg on PATH")
+        encoders = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            capture_output=True, text=True, check=False,
+        )
+        if encoders.returncode or "h264_nvenc" not in encoders.stdout:
+            raise ValueError(
+                "MP4 recording requires an FFmpeg build with NVIDIA NVENC "
+                "(h264_nvenc) support"
+            )
 
     def get_recording(self, task_id: str, recording_id: str) -> dict[str, Any]:
         with self.lock:
@@ -1309,13 +1315,7 @@ class TaskManager:
                 self.record_pending.task_done()
 
     def _record(self, task_id: str, recording_id: str) -> None:
-        recording = self.get_recording(task_id, recording_id)
-        # Recordings created before v8.6 have no render_mode and used Playwright's
-        # real-time video capture, so preserve that behavior when resuming them.
-        if recording.get("render_mode", "realtime") == "realtime":
-            self._record_realtime(task_id, recording_id)
-        else:
-            self._record_offline(task_id, recording_id)
+        self._record_offline(task_id, recording_id)
 
     def _record_offline(self, task_id: str, recording_id: str) -> None:
         from PIL import Image, ImageDraw
@@ -1361,14 +1361,14 @@ class TaskManager:
         fps = int(recording.get("fps", 30))
         duration = max(0.1, float(timeline.get("duration") or self.tasks[task_id].get("duration") or 0))
         frame_count = max(1, math.ceil(duration * fps))
-        final = folder / "dynamic-score.webm"
+        final = folder / "dynamic-score.mp4"
         command = [
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
             "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{width}x{height}",
-            "-r", str(fps), "-i", "-", "-an", "-c:v", "libvpx-vp9",
-            "-deadline", "realtime", "-cpu-used", "6", "-row-mt", "1",
-            "-b:v", "0", "-crf", "18",
-            "-pix_fmt", "yuv420p", str(final),
+            "-r", str(fps), "-i", "-", "-an", "-c:v", "h264_nvenc",
+            "-preset", "p4", "-tune", "hq", "-rc", "vbr",
+            "-cq", "20", "-b:v", "0", "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart", str(final),
         ]
         process = subprocess.Popen(command, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
         times = [float(point["t"]) for point in points]
@@ -1432,39 +1432,6 @@ class TaskManager:
             task_id, recording_id, status="completed", path=str(final), progress=1.0,
             rendered_seconds=round(duration, 2),
         )
-
-    def _record_realtime(self, task_id: str, recording_id: str) -> None:
-        from playwright.sync_api import sync_playwright
-
-        recording = self.get_recording(task_id, recording_id)
-        folder = self.root / task_id / "recordings" / recording_id
-        folder.mkdir(parents=True, exist_ok=True)
-        self._record_update(task_id, recording_id, status="running")
-        with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(**self._recording_launch_kwargs(playwright))
-            context = browser.new_context(
-                viewport={"width": recording["width"], "height": recording["height"]},
-                record_video_dir=str(folder),
-                record_video_size={"width": recording["width"], "height": recording["height"]},
-            )
-            page = context.new_page()
-            page.goto(
-                f"http://127.0.0.1:{self.port}/tasks/{task_id}"
-                f"?recording=1&paper_size={recording.get('paper_size', 'fit')}",
-                wait_until="networkidle",
-            )
-            page.wait_for_function("window.__DRUMLAB_SCORE_READY__ === true", timeout=120000)
-            page.wait_for_function("window.__DRUMLAB_RECORDING_STARTED__ === true", timeout=30000)
-            duration_ms = int((float(self.tasks[task_id]["duration"] or 0) + 30.0) * 1000)
-            page.wait_for_function("window.__DRUMLAB_SCORE_FINISHED__ === true", timeout=max(30000, duration_ms))
-            page.wait_for_timeout(500)
-            video = page.video
-            context.close()
-            source = Path(video.path())
-            final = folder / "dynamic-score.webm"
-            shutil.move(str(source), final)
-            browser.close()
-        self._record_update(task_id, recording_id, status="completed", path=str(final), progress=1.0)
 
     def recording_file(self, task_id: str, recording_id: str) -> Path:
         recording = self.get_recording(task_id, recording_id)

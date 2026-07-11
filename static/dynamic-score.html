@@ -40,6 +40,10 @@
     grid-row:1; background:#fff;
   }
   body.recording #sheet-wrap { width:calc(100% - 24px); max-width:none; margin:12px auto; padding:18px 22px 45px; }
+  /* OSMD's cursor lives outside the SVG and can advance beyond an A4-sized SVG
+     viewport. Let the engraved SVG content remain visible in the continuous
+     recording sheet instead of clipping it at the first page boundary. */
+  body.recording #sheet, body.recording #sheet svg { overflow:visible; }
   body.recording [id^="cursorImg"] { opacity:.38; }
   @media (max-width:700px) {
     #controls { grid-template-columns:auto auto 1fr auto; gap:7px; padding:7px; }
@@ -245,6 +249,7 @@ window.__DRUMLAB_EXPORT_TIMELINE__ = () => {
     0,
   );
   const contentHeight = Math.ceil(Math.max(wrap.scrollHeight, lastContentBottom + 45));
+  $("sheet").style.height = `${contentHeight}px`;
   wrap.style.height = `${contentHeight}px`;
   return {
     points,
@@ -400,7 +405,7 @@ audio.addEventListener("ended", () => {
     placeCursor(scoreTimeFromAudio(0), true); update();
     if (recordingMode && !offlineRecordingMode) {
       // Recording mode hides the transport controls, so the server cannot click Play.
-      // Muted autoplay is allowed in headless Chromium and the captured WebM is silent.
+      // Muted autoplay is allowed in headless Chromium and the captured video is silent.
       audio.muted = true;
       await audio.play();
       play.textContent = "Pause";

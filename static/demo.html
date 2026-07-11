@@ -152,21 +152,21 @@ function recordingRows(task) {
   for (const recording of values) {
     const row = el("div", "recording");
     row.append(el("span", `badge ${recording.status}`, recording.status));
-    row.append(document.createTextNode(`${recording.width}×${recording.height} · ${recording.fps || 30} FPS · ${recording.render_mode || "realtime"} · A4 ${recording.paper_size || "fit"}${recording.status === "running" ? ` · ${Math.round((recording.progress || 0) * 100)}%` : ""}`));
+    row.append(document.createTextNode(`${recording.width}×${recording.height} · ${recording.fps || 30} FPS · NVENC MP4 · A4 ${recording.paper_size || "fit"}${recording.status === "running" ? ` · ${Math.round((recording.progress || 0) * 100)}%` : ""}`));
     if (recording.status === "completed") {
-      const download = el("a", "", "下载 WebM"); download.href = recording.url; row.append(download);
+      const download = el("a", "", "下载 MP4"); download.href = recording.url; row.append(download);
     } else if (recording.error) row.append(el("span", "error-text", recording.error));
     wrap.append(row);
   }
   return wrap;
 }
 
-async function startRecording(taskId, ratio, width, paperSize, fps, renderMode, button) {
+async function startRecording(taskId, ratio, width, paperSize, fps, button) {
   button.disabled = true;
   try {
     await api(`/api/tasks/${encodeURIComponent(taskId)}/recordings`, {
       method:"POST", headers:{"content-type":"application/json"},
-      body:JSON.stringify({service_port:Number($("service-port").value),aspect_ratio:ratio,width:Number(width),paper_size:paperSize,fps:Number(fps),render_mode:renderMode}),
+      body:JSON.stringify({service_port:Number($("service-port").value),aspect_ratio:ratio,width:Number(width),paper_size:paperSize,fps:Number(fps)}),
     });
     await loadTasks();
   } catch (error) { alert(error.message); }
@@ -244,11 +244,9 @@ function taskRow(task) {
   }
   const recordFps = document.createElement("select"); recordFps.title="视频帧率";
   for (const value of [24,30,60]) { const option=el("option","",`${value} FPS`); option.value=String(value); if(value===30) option.selected=true; recordFps.append(option); }
-  const renderMode = document.createElement("select"); renderMode.title="录制方式";
-  for (const [value,label] of [["offline","快速离线"],["realtime","实时兼容"]]) { const option=el("option","",label); option.value=value; renderMode.append(option); }
   const record = el("button", "", "无声录制"); record.disabled = !completed;
-  record.addEventListener("click", () => startRecording(task.id, ratio.value, width.value, recordPaper.value, recordFps.value, renderMode.value, record));
-  controls.append(ratio,width,recordPaper,recordFps,renderMode,record);
+  record.addEventListener("click", () => startRecording(task.id, ratio.value, width.value, recordPaper.value, recordFps.value, record));
+  controls.append(ratio,width,recordPaper,recordFps,record);
   actionsCell.append(controls, recordingRows(task));
   tr.append(identity,state,options,result,actionsCell);
   return tr;

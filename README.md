@@ -246,7 +246,7 @@ outside approved directories.
 
 For manual operation, open `http://HOST:PORT/demo`. This page submits local-path tasks,
 polls the complete task queue, opens completed dynamic scores, exports MusicXML/MIDI, and
-starts or downloads silent WebM recordings in 16:9, 9:16, 4:3, or 1:1.
+starts or downloads silent GPU-encoded MP4 recordings in 16:9, 9:16, 4:3, or 1:1.
 
 MCP clients connect to `http://HOST:PORT/mcp/` and receive these tools:
 
@@ -266,20 +266,19 @@ Create a silent recording after the task completes:
 ```sh
 curl -X POST http://127.0.0.1:8765/api/tasks/TASK_ID/recordings \
   -H 'content-type: application/json' \
-  -d '{"service_port":8765,"aspect_ratio":"9:16","width":1080,"paper_size":"fit","fps":30,"render_mode":"offline"}'
+  -d '{"service_port":8765,"aspect_ratio":"9:16","width":1080,"paper_size":"fit","fps":30}'
 ```
 
-Recording runs asynchronously and produces a WebM without audio. Poll the returned recording
+Recording runs asynchronously and produces an H.264 MP4 without audio. Poll the returned recording
 URL until `completed`, then download its `url` field.
 
-The default `render_mode` is `offline`: Chromium engraves and captures the score once, then
-Pillow and FFmpeg render the cursor and scrolling from the saved score timing without playing
-the audio. This is deterministic and can run faster than the song duration. Set
-`"render_mode":"realtime"` only as a compatibility fallback. Video `fps` defaults to 30 and
-accepts 12–60. Offline score engraving uses 2x supersampling and high-quality VP9 encoding so
-thin staff lines remain sharp. Install the offline renderer with `uv pip install Pillow`.
+Chromium engraves and captures the score once, then Pillow renders the cursor and scrolling from
+the saved score timing without playing the audio. FFmpeg encodes H.264 through NVIDIA NVENC
+(`h264_nvenc`), so recording requires an NVIDIA GPU, driver, and an FFmpeg build with NVENC
+support. Video `fps` defaults to 30 and accepts 12–60. Score engraving uses 2x supersampling so
+thin staff lines remain sharp. Install Pillow with `uv pip install Pillow`.
 
-The video `aspect_ratio` and dimensions control only the WebM canvas. Score engraving always
+The video `aspect_ratio` and dimensions control only the MP4 canvas. Score engraving always
 uses portrait A4 (`A4_P`) inside that canvas. `paper_size` controls only the displayed A4
 zoom and accepts `fit`, `small`, `medium`, or `large`; it does not change measure/system
 breaks. The same A4 display-size choices are available on `/demo` and `/tasks/{task_id}`.

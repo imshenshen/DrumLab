@@ -110,9 +110,8 @@ def build_mcp_http_app(task_manager) -> tuple[Any, Any]:
         height: Optional[int] = None,
         paper_size: str = "fit",
         fps: int = 30,
-        render_mode: str = "offline",
     ) -> dict[str, Any]:
-        """Queue a silent WebM recording of a completed dynamic score."""
+        """Queue a silent GPU-encoded MP4 recording of a completed dynamic score."""
         return task_manager.create_recording(
             task_id,
             service_port,
@@ -121,7 +120,6 @@ def build_mcp_http_app(task_manager) -> tuple[Any, Any]:
             height=height,
             paper_size=paper_size,
             fps=fps,
-            render_mode=render_mode,
         )
 
     @server.tool()

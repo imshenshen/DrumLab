@@ -806,7 +806,6 @@ def create_task_recording(task_id: str, params: dict):
             height=params.get("height"),
             paper_size=params.get("paper_size", "fit"),
             fps=params.get("fps", 30),
-            render_mode=params.get("render_mode", "offline"),
         )
     except KeyError:
         raise HTTPException(404, "Task not found") from None
@@ -832,7 +831,7 @@ def task_recording_video(task_id: str, recording_id: str):
         raise HTTPException(404, "Recording file not found") from None
     except RuntimeError as exc:
         raise HTTPException(409, str(exc)) from None
-    return FileResponse(path, media_type="video/webm", filename=f"{task_id}-dynamic-score.webm")
+    return FileResponse(path, media_type="video/mp4", filename=f"{task_id}-dynamic-score.mp4")
 
 
 @app.get("/api/mcp/status")
