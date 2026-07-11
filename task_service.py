@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import hashlib
 import bisect
-import concurrent.futures
 import importlib.util
 import json
 import os
@@ -1393,7 +1392,6 @@ class TaskManager:
                 engraved_page,
                 (int(round(float(page_box["x"]))), int(round(float(page_box["y"])))),
             )
-        score_pixels = np.asarray(score, dtype=np.uint8)
         width, height = int(recording["width"]), int(recording["height"])
         fps = int(recording.get("fps", 30))
         audio_duration = max(
@@ -1401,103 +1399,128 @@ class TaskManager:
             float(timeline.get("duration") or self.tasks[task_id].get("duration") or 0),
         )
         duration = audio_duration
-        frame_count = max(1, math.ceil(duration * fps))
         final = folder / "dynamic-score.mp4"
-        command = [
-            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
-            "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{width}x{height}",
-            "-r", str(fps), "-i", "-", "-an", "-c:v", "h264_nvenc",
-            "-preset", "p4", "-tune", "hq", "-rc", "vbr",
-            "-cq", "20", "-b:v", "0", "-pix_fmt", "yuv420p",
-            "-movflags", "+faststart", str(final),
-        ]
-        process = subprocess.Popen(command, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
-        record_log("NVENC process started; preparing frame timeline")
-        point_times = [float(point["t"]) for point in points]
-        scroll_y = 0.0
+        score.save(score_png)
+        cursor_png = folder / "cursor.png"
+        filter_script = folder / "recording-filter.txt"
+        cursor_width = max(4, round(float(np.median([p.get("width", 4) for p in points]))))
+        cursor_height = max(12, round(float(np.median([p.get("height", 20) for p in points]))))
+        Image.new("RGBA", (cursor_width, cursor_height), (66, 214, 111, 92)).save(cursor_png)
+
         sheet_x = max(0, (width - score.width) // 2)
         sheet_top = 12
-        frame_specs = []
-        for frame_index in range(frame_count):
-            seconds = frame_index / fps
-            point = points[max(0, bisect.bisect_right(point_times, seconds) - 1)]
-            target_scroll = max(0.0, min(
-                max(0, score.height - height + sheet_top * 2),
-                float(point["y"]) - height * 0.30,
+        max_scroll = max(0, score.height - height + sheet_top * 2)
+        samples: list[tuple[float, float, float, float]] = []
+        for point in points:
+            timestamp = max(0.0, min(duration, float(point["t"])))
+            target_scroll = max(0.0, min(max_scroll, float(point["y"]) - height * 0.30))
+            samples.append((
+                timestamp,
+                target_scroll,
+                sheet_x + float(point["x"]),
+                sheet_top + float(point["y"]),
             ))
-            scroll_y += (target_scroll - scroll_y) * min(1.0, 2.5 / fps)
-            frame_specs.append((frame_index, point, int(round(scroll_y))))
+        samples.sort(key=lambda item: item[0])
+        collapsed_samples: list[tuple[float, float, float, float]] = []
+        for sample in samples:
+            if collapsed_samples and abs(sample[0] - collapsed_samples[-1][0]) <= 0.0001:
+                collapsed_samples[-1] = sample
+            else:
+                collapsed_samples.append(sample)
+        samples = collapsed_samples
 
-        def render_frame(spec) -> bytes:
-            _, point, scroll = spec
-            frame = np.full((height, width, 3), 255, dtype=np.uint8)
-            source_top = max(0, scroll - sheet_top)
-            destination_top = max(0, sheet_top - scroll)
-            visible_height = min(score.height - source_top, height - destination_top)
-            if visible_height > 0:
-                paste_width = min(score.width, width - sheet_x)
-                frame[destination_top:destination_top + visible_height,
-                      sheet_x:sheet_x + paste_width] = score_pixels[
-                          source_top:source_top + visible_height, :paste_width]
-            cursor_x = round(sheet_x + float(point["x"]))
-            cursor_y = round(sheet_top + float(point["y"]) - scroll)
-            cursor_w = max(4, round(float(point.get("width", 4))))
-            cursor_h = max(12, round(float(point.get("height", 20))))
-            x0, x1 = max(0, cursor_x), min(width, cursor_x + cursor_w + 1)
-            y0, y1 = max(0, cursor_y), min(height, cursor_y + cursor_h + 1)
-            if x1 > x0 and y1 > y0:
-                alpha = 92 / 255.0
-                region = frame[y0:y1, x0:x1]
-                region[:] = (
-                    region.astype(np.float32) * (1.0 - alpha)
-                    + np.array((66, 214, 111), dtype=np.float32) * alpha
-                ).astype(np.uint8)
-            return frame.tobytes()
+        def step_expression(value_index: int) -> str:
+            expression = f"{samples[0][value_index]:.3f}"
+            previous = samples[0][value_index]
+            previous_time = samples[0][0]
+            for sample in samples[1:]:
+                timestamp, value = sample[0], sample[value_index]
+                if timestamp <= previous_time + 0.0001:
+                    previous = value
+                    continue
+                delta = value - previous
+                if abs(delta) >= 0.01:
+                    expression += f"+({delta:.3f})*gte(t,{timestamp:.4f})"
+                previous, previous_time = value, timestamp
+            return expression
 
-        workers = min(12, max(2, os.cpu_count() or 2))
-        batch_size = workers * 3
-        render_started = last_log = time.monotonic()
-        record_log(f"rendering {frame_count} frames with {workers} CPU workers")
-        try:
-            assert process.stdin is not None
-            with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-                for batch_start in range(0, frame_count, batch_size):
-                    batch = frame_specs[batch_start:batch_start + batch_size]
-                    for offset, frame_bytes in enumerate(executor.map(render_frame, batch)):
-                        frame_index = batch_start + offset
-                        process.stdin.write(frame_bytes)
-                        now = time.monotonic()
-                        if now - last_log >= 5.0 or frame_index + 1 == frame_count:
-                            elapsed = max(0.001, now - render_started)
-                            render_fps = (frame_index + 1) / elapsed
-                            eta = (frame_count - frame_index - 1) / max(0.001, render_fps)
-                            record_log(
-                                f"{frame_index + 1}/{frame_count} frames "
-                                f"({render_fps:.1f} FPS, ETA {eta:.0f}s)"
-                            )
-                            self._record_update(
-                                task_id, recording_id,
-                                progress=round((frame_index + 1) / frame_count, 4),
-                                rendered_seconds=round((frame_index + 1) / fps, 2),
-                                render_fps=round(render_fps, 2),
-                                eta_seconds=round(eta, 1),
-                            )
-                            last_log = now
-            process.stdin.close()
-            stderr = process.stderr.read().decode("utf-8", "replace") if process.stderr else ""
-            return_code = process.wait()
-            if return_code:
-                raise RuntimeError(f"FFmpeg offline recording failed: {stderr.strip()}")
-        except (BrokenPipeError, OSError):
-            process.kill()
-            stderr = process.stderr.read().decode("utf-8", "replace") if process.stderr else ""
-            raise RuntimeError(f"FFmpeg offline recording stopped: {stderr.strip()}") from None
-        finally:
-            if process.poll() is None:
-                process.kill()
+        scroll_expression = f"{samples[0][1]:.3f}"
+        previous_scroll = samples[0][1]
+        previous_time = samples[0][0]
+        for timestamp, target_scroll, _, _ in samples[1:]:
+            if timestamp <= previous_time + 0.0001:
+                previous_scroll = target_scroll
+                continue
+            delta = target_scroll - previous_scroll
+            if abs(delta) >= 0.5:
+                scroll_expression += (
+                    f"+({delta:.3f})*clip((t-{timestamp:.4f})/0.8,0,1)"
+                )
+            previous_scroll, previous_time = target_scroll, timestamp
+        cursor_x_expression = step_expression(2)
+        cursor_page_y_expression = step_expression(3)
+        cursor_y_expression = f"({cursor_page_y_expression})-({scroll_expression})"
+        padded_height = max(height, score.height)
+        filter_script.write_text(
+            f"[0:v]pad={width}:{padded_height}:(ow-iw)/2:0:white,"
+            f"crop@score={width}:{height}:0:'{scroll_expression}'[background];\n"
+            f"[background][1:v]overlay@cursor=x='{cursor_x_expression}':"
+            f"y='{cursor_y_expression}':eval=frame:shortest=1,format=yuv420p[out]",
+            encoding="utf-8",
+        )
+        command = [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-loop", "1", "-framerate", str(fps), "-i", str(score_png),
+            "-loop", "1", "-framerate", str(fps), "-i", str(cursor_png),
+            "-filter_complex_script", str(filter_script), "-map", "[out]",
+            "-t", f"{duration:.6f}", "-r", str(fps), "-an", "-c:v", "h264_nvenc",
+            "-preset", "p4", "-tune", "hq", "-rc", "vbr",
+            "-cq", "20", "-b:v", "0", "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart", "-progress", "pipe:1", "-nostats", str(final),
+        ]
+        record_log("FFmpeg filter pipeline + NVENC started (no Python frame pipe)")
+        process = subprocess.Popen(
+            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, bufsize=1,
+        )
+        last_progress_log = time.monotonic()
+        rendered_seconds = 0.0
+        assert process.stdout is not None
+        for line in process.stdout:
+            key, separator, value = line.strip().partition("=")
+            if not separator:
+                continue
+            if key in ("out_time_us", "out_time_ms"):
+                # Modern FFmpeg reports both fields in microseconds despite the
+                # historical out_time_ms name.
+                rendered_seconds = max(rendered_seconds, float(value) / 1_000_000.0)
+            now = time.monotonic()
+            if now - last_progress_log >= 5.0:
+                progress = min(1.0, rendered_seconds / duration)
+                elapsed = max(0.001, now - engrave_started)
+                effective_fps = rendered_seconds * fps / elapsed
+                eta = max(0.0, duration - rendered_seconds) / max(
+                    0.001, rendered_seconds / elapsed,
+                )
+                record_log(
+                    f"FFmpeg {progress * 100:.1f}% "
+                    f"({effective_fps:.1f} FPS, ETA {eta:.0f}s)"
+                )
+                self._record_update(
+                    task_id, recording_id, progress=round(progress, 4),
+                    rendered_seconds=round(rendered_seconds, 2),
+                    render_fps=round(effective_fps, 2), eta_seconds=round(eta, 1),
+                )
+                last_progress_log = now
+        stderr = process.stderr.read() if process.stderr else ""
+        return_code = process.wait()
+        if return_code:
+            raise RuntimeError(f"FFmpeg GPU recording failed: {stderr.strip()}")
         score_png.unlink(missing_ok=True)
         for page_png in page_pngs:
             page_png.unlink(missing_ok=True)
+        cursor_png.unlink(missing_ok=True)
+        filter_script.unlink(missing_ok=True)
         self._record_update(
             task_id, recording_id, status="completed", path=str(final), progress=1.0,
             rendered_seconds=round(duration, 2),
