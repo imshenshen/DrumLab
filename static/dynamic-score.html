@@ -271,6 +271,7 @@ audio.addEventListener("ended", () => {
     osmd = new opensheetmusicdisplay.OpenSheetMusicDisplay("sheet", {
       autoResize: false, backend: "svg", drawTitle: false, drawPartNames: false,
       followCursor: false, pageFormat: "A4_P", pageBackgroundColor: "#ffffff",
+      newSystemFromXML: true,
     });
     await osmd.load(xml);
     const requestedPaperSize = selectedPaperSize();

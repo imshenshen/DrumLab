@@ -38,7 +38,7 @@ STAFF_MAP = {
     "hihat": ("G", 5, "x"),
     "cymbal": ("A", 5, "x"),
 }
-SCORE_VERSION = 5  # v5 adds persisted pickup/anacrusis notation
+SCORE_VERSION = 6  # v6 consolidates rhythmic gaps and adds beat-aware beaming
 
 
 def _now() -> str:
@@ -692,6 +692,7 @@ class TaskManager:
         if slots_per_measure_fraction.denominator != 1:
             raise ValueError("grid must divide the selected time signature into whole slots")
         slots_per_measure = int(slots_per_measure_fraction)
+        slots_per_beat = max(1, round(slots_per_measure / beats_per_measure))
         pickup_slots, _ = self._pickup_slots(pickup_beats, beats_per_measure, slots_per_measure)
         step_seconds = float(frac) * 60.0 / float(tempo)
         source_slots = int(math.ceil(float(duration_seconds or 0) / step_seconds))
@@ -721,21 +722,44 @@ class TaskManager:
             if not is_pickup and full_index > 0 and full_index % measures_per_system == 0:
                 measure.insert(0, layout.SystemLayout(isNew=True))
 
-            for local_slot in range(slot_count):
-                global_slot = start_slot + local_slot
-                names = sorted(by_offset.get(global_slot, ()))
-                if not names:
-                    element = note.Rest()
-                elif len(names) == 1:
-                    element = unpitched(names[0])
-                else:
-                    element = percussion.PercussionChord([unpitched(name) for name in names])
-                element.duration = m21dur.Duration(frac)
-                measure.insert(Fraction(local_slot) * frac, element)
+            active_slots = [
+                local_slot for local_slot in range(slot_count)
+                if by_offset.get(start_slot + local_slot)
+            ]
+            if not active_slots:
+                whole_measure_rest = note.Rest()
+                whole_measure_rest.duration = m21dur.Duration(Fraction(slot_count) * frac)
+                measure.insert(0, whole_measure_rest)
+            else:
+                if active_slots[0] > 0:
+                    opening_rest = note.Rest()
+                    opening_rest.duration = m21dur.Duration(Fraction(active_slots[0]) * frac)
+                    measure.insert(0, opening_rest)
+                for index, local_slot in enumerate(active_slots):
+                    global_slot = start_slot + local_slot
+                    names = sorted(by_offset[global_slot])
+                    next_slot = active_slots[index + 1] if index + 1 < len(active_slots) else slot_count
+                    gap_slots = max(1, next_slot - local_slot)
+                    duration_slots = min(gap_slots, slots_per_beat)
+                    if len(names) == 1:
+                        element = unpitched(names[0])
+                    else:
+                        element = percussion.PercussionChord([unpitched(name) for name in names])
+                    # The grid controls onset snapping, not a fixed printed duration.
+                    # Extend each rhythmic event to the next onset so eighth/sixteenth
+                    # patterns can beam together instead of being separated by tiny rests.
+                    element.duration = m21dur.Duration(Fraction(duration_slots) * frac)
+                    measure.insert(Fraction(local_slot) * frac, element)
+                    remaining_slots = gap_slots - duration_slots
+                    if remaining_slots > 0:
+                        consolidated_rest = note.Rest()
+                        consolidated_rest.duration = m21dur.Duration(Fraction(remaining_slots) * frac)
+                        measure.insert(Fraction(local_slot + duration_slots) * frac, consolidated_rest)
             if is_pickup:
                 measure.padAsAnacrusis()
                 measure.showNumber = stream.enums.ShowNumber.NEVER
             part.append(measure)
+        part.makeBeams(inPlace=True, failOnNoTimeSignature=False)
         stream.Score([part]).write("musicxml", fp=str(path))
 
     @staticmethod

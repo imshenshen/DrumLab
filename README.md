@@ -202,6 +202,10 @@ still expressed as quarter-note BPM, matching the ADTOF estimate.
 explicit MusicXML system breaks, so the same number of measures per line is used in the
 dynamic page, A4 printing, and silent recordings.
 
+The quantization grid snaps onset positions; it is not assigned as every note's printed
+duration. DrumLab derives rhythmic duration from the next onset, consolidates silent spans,
+and applies beat-aware beaming so continuous eighth/sixteenth patterns stay visually grouped.
+
 Pickup handling uses `pickup_mode`: `none`, `manual`, or `auto` (default). Manual mode uses
 `pickup_beats`; auto mode scores kick, snare, and cymbal bar phases and stores both the
 detected pickup length and confidence. On a completed task, the dynamic-score page can edit
