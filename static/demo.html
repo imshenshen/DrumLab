@@ -35,6 +35,8 @@
   .queue-head { display:flex; align-items:center; gap:10px; margin-bottom:12px; }
   .queue-head h2 { margin:0; }
   #queue-summary { color:var(--dim); }
+  .auto-refresh { display:flex; grid-auto-flow:column; align-items:center; gap:6px; margin-left:auto; color:var(--dim); font-size:12px; cursor:pointer; }
+  .auto-refresh input { width:16px; height:16px; margin:0; accent-color:var(--blue); }
   #refresh { margin-left:auto; }
   .table-wrap { overflow:auto; border:1px solid var(--line); border-radius:8px; }
   table { width:100%; border-collapse:collapse; min-width:1040px; }
@@ -106,7 +108,7 @@
   </section>
 
   <section class="card">
-    <div class="queue-head"><h2>任务队列</h2><span id="queue-summary"></span><button id="refresh" class="secondary" type="button">立即刷新</button></div>
+    <div class="queue-head"><h2>任务队列</h2><span id="queue-summary"></span><label class="auto-refresh"><input id="auto-refresh" type="checkbox" checked>自动刷新</label><button id="refresh" class="secondary" type="button">立即刷新</button></div>
     <div class="table-wrap">
       <table>
         <thead><tr><th>任务</th><th>状态</th><th>参数</th><th>结果</th><th>操作与录制</th></tr></thead>
@@ -121,6 +123,13 @@
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? "");
 let polling = null;
+
+function syncAutoRefresh() {
+  const enabled = $("auto-refresh").checked;
+  localStorage.setItem("drumlab-demo-auto-refresh", enabled ? "1" : "0");
+  if (polling !== null) clearInterval(polling);
+  polling = enabled ? setInterval(loadTasks, 1500) : null;
+}
 
 async function api(url, options) {
   const response = await fetch(url, options);
@@ -303,6 +312,7 @@ $("task-form").addEventListener("submit", async event => {
 });
 
 $("refresh").addEventListener("click", loadTasks);
+$("auto-refresh").addEventListener("change", syncAutoRefresh);
 $("source-mode").addEventListener("change", event => {
   const drumOnly = event.target.value === "drum_only";
   $("model").disabled = drumOnly;
@@ -313,7 +323,8 @@ $("pickup-mode").addEventListener("change", event => {
 });
 $("service-port").value = location.port || (location.protocol === "https:" ? 443 : 80);
 loadTasks();
-polling = setInterval(loadTasks, 1500);
+$("auto-refresh").checked = localStorage.getItem("drumlab-demo-auto-refresh") !== "0";
+syncAutoRefresh();
 </script>
 </body>
 </html>

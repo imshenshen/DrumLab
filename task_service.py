@@ -1407,7 +1407,10 @@ class TaskManager:
         cursor_height = max(12, round(float(np.median([p.get("height", 20) for p in points]))))
         Image.new("RGBA", (cursor_width, cursor_height), (66, 214, 111, 92)).save(cursor_png)
 
-        sheet_x = max(0, (width - score.width) // 2)
+        # A fit-to-width sheet can be a few CSS pixels wider than the even video
+        # dimensions. Pad only when the sheet is narrower; otherwise crop the
+        # wider sheet symmetrically. Use the same offset for cursor coordinates.
+        sheet_x = (width - score.width) / 2.0
         sheet_top = 12
         max_scroll = max(0, score.height - height + sheet_top * 2)
         samples: list[tuple[float, float, float, float]] = []
@@ -1460,10 +1463,11 @@ class TaskManager:
         cursor_x_expression = step_expression(2)
         cursor_page_y_expression = step_expression(3)
         cursor_y_expression = f"({cursor_page_y_expression})-({scroll_expression})"
+        padded_width = max(width, score.width)
         padded_height = max(height, score.height)
         filter_script.write_text(
-            f"[0:v]pad={width}:{padded_height}:(ow-iw)/2:0:white,"
-            f"crop@score={width}:{height}:0:'{scroll_expression}'[background];\n"
+            f"[0:v]pad={padded_width}:{padded_height}:(ow-iw)/2:0:white,"
+            f"crop@score={width}:{height}:(iw-{width})/2:'{scroll_expression}'[background];\n"
             f"[background][1:v]overlay@cursor=x='{cursor_x_expression}':"
             f"y='{cursor_y_expression}':eval=frame:shortest=1,format=yuv420p[out]",
             encoding="utf-8",
