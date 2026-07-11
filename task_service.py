@@ -1448,7 +1448,10 @@ class TaskManager:
         sheet_x = float(timeline.get("wrapX") or 0)
         sheet_origin_y = float(timeline.get("wrapY") or 0)
         sheet_top = 12
-        max_scroll = max(0, score.height - height + sheet_top * 2)
+        # This must exactly match FFmpeg crop's maximum y (input height minus
+        # output height). If it is even slightly larger, crop clamps the score
+        # while the cursor expression keeps moving upward on the final screen.
+        max_scroll = max(0, score.height - height)
         samples: list[tuple[float, float, float, float]] = []
         for point in points:
             timestamp = max(0.0, min(duration, float(point["t"])))
