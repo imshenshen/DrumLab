@@ -1384,7 +1384,10 @@ class TaskManager:
                     max(0, score.height - height + sheet_top * 2),
                     float(point["y"]) - height * 0.30,
                 ))
-                scroll_y += (target_scroll - scroll_y) * min(1.0, 8.0 / fps)
+                # Ease toward the current system instead of snapping when the
+                # cursor crosses a system break. The score is wider in recording
+                # mode, so this gentle follow keeps downward motion readable.
+                scroll_y += (target_scroll - scroll_y) * min(1.0, 2.5 / fps)
                 scroll = int(round(scroll_y))
                 frame = Image.new("RGB", (width, height), (217, 220, 226))
                 source_top = max(0, scroll - sheet_top)

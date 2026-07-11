@@ -270,7 +270,14 @@ async function applyPaperSize() {
   if (!zoom) {
     const availableWidth = Math.max(320, viewport.clientWidth - 28);
     const availableHeight = Math.max(450, viewport.clientHeight - 28);
-    zoom = Math.min(availableWidth / A4_WIDTH_UNITS, availableHeight / A4_HEIGHT_UNITS);
+    // A recording is a moving viewport over the score, so fit the paper to the
+    // video width and let its height extend below the frame. Fitting both axes
+    // would shrink the entire A4 page into landscape recordings and make the
+    // notation unreadably small. The cursor-following recorder scrolls through
+    // the resulting full-width score as playback advances.
+    zoom = recordingMode
+      ? availableWidth / A4_WIDTH_UNITS
+      : Math.min(availableWidth / A4_WIDTH_UNITS, availableHeight / A4_HEIGHT_UNITS);
   }
 
   // A4_P fixes the engraving/page layout. Zoom changes only the displayed paper
