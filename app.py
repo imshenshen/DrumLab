@@ -660,6 +660,8 @@ def create_task(params: dict):
             device=params.get("device", "cuda"),
             source_mode=params.get("source_mode", "full_mix"),
             grid=params.get("grid", "1/16"),
+            beats_per_measure=params.get("beats_per_measure", 4),
+            beat_unit=params.get("beat_unit", 4),
             fps=params.get("fps", 100),
             thresholds=params.get("thresholds"),
         )
@@ -739,6 +741,7 @@ def create_task_recording(task_id: str, params: dict):
             aspect_ratio=params.get("aspect_ratio", "16:9"),
             width=params.get("width", 1920),
             height=params.get("height"),
+            paper_size=params.get("paper_size", "fit"),
         )
     except KeyError:
         raise HTTPException(404, "Task not found") from None

@@ -38,7 +38,7 @@ STAFF_MAP = {
     "hihat": ("G", 5, "x"),
     "cymbal": ("A", 5, "x"),
 }
-SCORE_VERSION = 2  # v2 extends notation/rests through the source audio duration
+SCORE_VERSION = 3  # v3 persists the requested time signature in MusicXML
 
 
 def _now() -> str:
@@ -197,6 +197,8 @@ class TaskManager:
         device: str = "cuda",
         source_mode: str = "full_mix",
         grid: str = "1/16",
+        beats_per_measure: int = 4,
+        beat_unit: int = 4,
         fps: int = 100,
         thresholds: Optional[dict[str, float]] = None,
     ) -> dict[str, Any]:
@@ -204,6 +206,12 @@ class TaskManager:
         source = self._validate_audio_path(audio_path)
         if grid not in GRID_Q:
             raise ValueError(f"grid must be one of {list(GRID_Q)}")
+        beats_per_measure = int(beats_per_measure)
+        beat_unit = int(beat_unit)
+        if not 1 <= beats_per_measure <= 32:
+            raise ValueError("beats_per_measure must be between 1 and 32")
+        if beat_unit not in (1, 2, 4, 8, 16, 32):
+            raise ValueError("beat_unit must be one of 1, 2, 4, 8, 16, or 32")
         if device not in ("cuda", "cpu"):
             raise ValueError("device must be cuda or cpu")
         if source_mode not in ("full_mix", "drum_only"):
@@ -239,6 +247,8 @@ class TaskManager:
                 "device": device,
                 "source_mode": source_mode,
                 "grid": grid,
+                "beats_per_measure": beats_per_measure,
+                "beat_unit": beat_unit,
                 "fps": int(fps),
                 "thresholds": merged_thresholds,
             },
@@ -484,6 +494,8 @@ class TaskManager:
             "tempo": float(meta["tempo"]),
             "duration": float(meta["duration"]),
             "grid": opts["grid"],
+            "beats_per_measure": opts.get("beats_per_measure", 4),
+            "beat_unit": opts.get("beat_unit", 4),
             "thresholds": opts["thresholds"],
             "events": events,
             "counts": {name: len(values) for name, values in events.items()},
@@ -495,6 +507,8 @@ class TaskManager:
             opts["grid"],
             folder / "score.musicxml",
             duration_seconds=float(meta["duration"]),
+            beats_per_measure=opts.get("beats_per_measure", 4),
+            beat_unit=opts.get("beat_unit", 4),
         )
         self._build_midi(events, float(meta["tempo"]), folder / "performance.mid")
         self._check_abort(task_id)
@@ -545,6 +559,8 @@ class TaskManager:
         grid: str,
         path: Path,
         duration_seconds: Optional[float] = None,
+        beats_per_measure: int = 4,
+        beat_unit: int = 4,
     ) -> None:
         from music21 import clef, duration as m21dur, meter, note, percussion, stream, tempo as m21tempo
 
@@ -566,7 +582,7 @@ class TaskManager:
         part = stream.Part()
         part.partName = "Drums"
         part.insert(0, clef.PercussionClef())
-        part.insert(0, meter.TimeSignature("4/4"))
+        part.insert(0, meter.TimeSignature(f"{beats_per_measure}/{beat_unit}"))
         part.insert(0, m21tempo.MetronomeMark(number=round(tempo, 2)))
         for slot in sorted(by_offset):
             names = sorted(by_offset[slot])
@@ -615,7 +631,7 @@ class TaskManager:
         return path
 
     def _upgrade_musicxml(self, task_id: str) -> None:
-        """Lazily extend pre-v2 scores to the full audio duration without GPU work."""
+        """Lazily regenerate older scores without GPU work."""
         with self.lock:
             task = self.tasks[task_id]
             if int(task.get("score_version") or 0) >= SCORE_VERSION:
@@ -628,6 +644,8 @@ class TaskManager:
                 payload.get("grid", task.get("options", {}).get("grid", "1/16")),
                 folder / "score.musicxml",
                 duration_seconds=float(payload.get("duration") or task.get("duration") or 0),
+                beats_per_measure=int(payload.get("beats_per_measure", task.get("options", {}).get("beats_per_measure", 4))),
+                beat_unit=int(payload.get("beat_unit", task.get("options", {}).get("beat_unit", 4))),
             )
             task["score_version"] = SCORE_VERSION
             task["updated_at"] = _now()
@@ -654,11 +672,14 @@ class TaskManager:
         aspect_ratio: str = "16:9",
         width: int = 1920,
         height: Optional[int] = None,
+        paper_size: str = "fit",
     ) -> dict[str, Any]:
         self._validate_port(service_port)
         task = self.get(task_id)
         if task["status"] != "completed":
             raise ValueError("The score task must be completed before recording")
+        if paper_size not in ("fit", "small", "medium", "large"):
+            raise ValueError("paper_size must be fit, small, medium, or large")
         width, height = self._video_dimensions(aspect_ratio, width, height)
         recording_id = uuid.uuid4().hex
         recording = {
@@ -666,6 +687,8 @@ class TaskManager:
             "status": "queued",
             "width": width,
             "height": height,
+            "paper_format": "A4_P",
+            "paper_size": paper_size,
             "created_at": _now(),
             "updated_at": _now(),
             "error": None,
@@ -716,7 +739,11 @@ class TaskManager:
                 record_video_size={"width": recording["width"], "height": recording["height"]},
             )
             page = context.new_page()
-            page.goto(f"http://127.0.0.1:{self.port}/tasks/{task_id}?recording=1", wait_until="networkidle")
+            page.goto(
+                f"http://127.0.0.1:{self.port}/tasks/{task_id}"
+                f"?recording=1&paper_size={recording.get('paper_size', 'fit')}",
+                wait_until="networkidle",
+            )
             page.wait_for_function("window.__DRUMLAB_SCORE_READY__ === true", timeout=120000)
             page.click("#play")
             duration_ms = int((float(self.tasks[task_id]["duration"] or 0) + 30.0) * 1000)

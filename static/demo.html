@@ -54,7 +54,7 @@
   progress { width:110px; height:7px; accent-color:var(--blue); }
   .stage { display:block; margin-top:4px; color:var(--dim); font-size:11px; }
   .actions { display:flex; flex-wrap:wrap; gap:7px; min-width:250px; }
-  .record-controls { display:grid; grid-template-columns:76px 84px auto; gap:6px; margin-top:7px; }
+  .record-controls { display:grid; grid-template-columns:76px 84px 92px auto; gap:6px; margin-top:7px; }
   .record-controls select,.record-controls input { height:32px; padding:4px 6px; }
   .recordings { display:grid; gap:5px; margin-top:8px; }
   .recording { display:flex; align-items:center; gap:7px; color:var(--dim); font-size:11px; }
@@ -81,6 +81,8 @@
         <label>Demucs 模型<select id="model"><option>htdemucs</option><option>htdemucs_ft</option><option>mdx_extra</option><option>mdx_extra_q</option></select></label>
         <label>设备<select id="device"><option value="cuda">CUDA</option><option value="cpu">CPU</option></select></label>
         <label>量化网格<select id="grid"><option>1/16</option><option>1/8</option><option>1/16T</option><option>1/32</option></select></label>
+        <label>每小节拍数<input id="beats-per-measure" type="number" min="1" max="32" value="4"></label>
+        <label>以几分音符为一拍<select id="beat-unit"><option>1</option><option>2</option><option selected>4</option><option>8</option><option>16</option><option>32</option></select></label>
         <label>ADTOF FPS<input id="fps" type="number" min="25" max="200" value="100"></label>
       </div>
       <details class="thresholds">
@@ -144,7 +146,7 @@ function recordingRows(task) {
   for (const recording of values) {
     const row = el("div", "recording");
     row.append(el("span", `badge ${recording.status}`, recording.status));
-    row.append(document.createTextNode(`${recording.width}×${recording.height}`));
+    row.append(document.createTextNode(`${recording.width}×${recording.height} · A4 ${recording.paper_size || "fit"}`));
     if (recording.status === "completed") {
       const download = el("a", "", "下载 WebM"); download.href = recording.url; row.append(download);
     } else if (recording.error) row.append(el("span", "error-text", recording.error));
@@ -153,12 +155,12 @@ function recordingRows(task) {
   return wrap;
 }
 
-async function startRecording(taskId, ratio, width, button) {
+async function startRecording(taskId, ratio, width, paperSize, button) {
   button.disabled = true;
   try {
     await api(`/api/tasks/${encodeURIComponent(taskId)}/recordings`, {
       method:"POST", headers:{"content-type":"application/json"},
-      body:JSON.stringify({service_port:Number($("service-port").value),aspect_ratio:ratio,width:Number(width)}),
+      body:JSON.stringify({service_port:Number($("service-port").value),aspect_ratio:ratio,width:Number(width),paper_size:paperSize}),
     });
     await loadTasks();
   } catch (error) { alert(error.message); }
@@ -190,7 +192,8 @@ function taskRow(task) {
   const options = document.createElement("td");
   const sourceLabel = task.options?.source_mode === "drum_only" ? "drum only" : esc(task.options?.model);
   const timeoutLabel = Number(task.timeout_seconds) > 0 ? `${task.timeout_seconds}s timeout` : "no timeout";
-  options.append(el("div", "", `${sourceLabel} · ${esc(task.options?.device)}`), el("div", "stage", `${esc(task.options?.grid)} · ${esc(task.options?.fps)} FPS · ${timeoutLabel}`));
+  const meter = `${task.options?.beats_per_measure || 4}/${task.options?.beat_unit || 4}`;
+  options.append(el("div", "", `${sourceLabel} · ${esc(task.options?.device)}`), el("div", "stage", `${meter} · 网格 ${esc(task.options?.grid)} · ${esc(task.options?.fps)} FPS · ${timeoutLabel}`));
 
   const result = document.createElement("td");
   if (task.status === "completed") {
@@ -207,7 +210,16 @@ function taskRow(task) {
     stopButton.addEventListener("click", () => stopTask(task.id, stopButton));
     actions.append(stopButton);
   }
-  actions.append(actionLink("打开动态谱", task.urls.page, completed));
+  const viewPaper = document.createElement("select");
+  viewPaper.title = "Task 页面中的 A4 谱纸显示大小";
+  for (const [value,label] of [["fit","A4 适应"],["small","A4 小"],["medium","A4 中"],["large","A4 大"]]) {
+    const option=el("option","",label); option.value=value; if(value==="medium") option.selected=true; viewPaper.append(option);
+  }
+  const scoreLink = actionLink("打开动态谱", `${task.urls.page}?paper_size=medium`, completed);
+  viewPaper.addEventListener("change", () => {
+    if (completed) scoreLink.href = `${task.urls.page}?paper_size=${encodeURIComponent(viewPaper.value)}`;
+  });
+  actions.append(viewPaper, scoreLink);
   actions.append(actionLink("MusicXML", task.urls.musicxml, completed));
   actions.append(actionLink("MIDI", `/api/tasks/${encodeURIComponent(task.id)}/midi`, completed));
   actionsCell.append(actions);
@@ -215,9 +227,13 @@ function taskRow(task) {
   const ratio = document.createElement("select");
   for (const value of ["16:9","9:16","4:3","1:1"]) { const option=el("option","",value); option.value=value; ratio.append(option); }
   const width = document.createElement("input"); width.type="number"; width.min="320"; width.max="3840"; width.value="1920"; width.title="录制宽度";
+  const recordPaper = document.createElement("select"); recordPaper.title="录制画面中的 A4 谱纸显示大小";
+  for (const [value,label] of [["fit","A4 适应"],["small","A4 小"],["medium","A4 中"],["large","A4 大"]]) {
+    const option=el("option","",label); option.value=value; recordPaper.append(option);
+  }
   const record = el("button", "", "无声录制"); record.disabled = !completed;
-  record.addEventListener("click", () => startRecording(task.id, ratio.value, width.value, record));
-  controls.append(ratio,width,record);
+  record.addEventListener("click", () => startRecording(task.id, ratio.value, width.value, recordPaper.value, record));
+  controls.append(ratio,width,recordPaper,record);
   actionsCell.append(controls, recordingRows(task));
   tr.append(identity,state,options,result,actionsCell);
   return tr;
@@ -252,6 +268,7 @@ $("task-form").addEventListener("submit", async event => {
         audio_path:$("audio-path").value.trim(), service_port:Number($("service-port").value),
         model:$("model").value, device:$("device").value, source_mode:$("source-mode").value,
         grid:$("grid").value,
+        beats_per_measure:Number($("beats-per-measure").value), beat_unit:Number($("beat-unit").value),
         fps:Number($("fps").value), thresholds,
       }),
     });

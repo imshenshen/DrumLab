@@ -192,6 +192,12 @@ curl -X POST http://127.0.0.1:8765/api/tasks \
 ADTOF directly). The same argument is available in the MCP `create_drum_score_task` tool
 and in the `/demo` form.
 
+Set the notation time signature with `beats_per_measure` and `beat_unit`; both default to
+`4`, producing 4/4. For example, `{"beats_per_measure":6,"beat_unit":8,"grid":"1/16"}`
+produces a 6/8 score quantized to sixteenth-note positions. The time signature controls
+measure structure, while `grid` independently controls the smallest timing snap. Tempo is
+still expressed as quarter-note BPM, matching the ADTOF estimate.
+
 The response contains a task ID and `queued` or `running` status. Poll
 `GET /api/tasks/{task_id}` until `completed`, then open `/tasks/{task_id}`. Artifacts are
 available from the URL map in the task response. The supplied `service_port` must match the
@@ -220,11 +226,16 @@ Create a silent recording after the task completes:
 ```sh
 curl -X POST http://127.0.0.1:8765/api/tasks/TASK_ID/recordings \
   -H 'content-type: application/json' \
-  -d '{"service_port":8765,"aspect_ratio":"9:16","width":1080}'
+  -d '{"service_port":8765,"aspect_ratio":"9:16","width":1080,"paper_size":"fit"}'
 ```
 
 Recording runs asynchronously and produces a WebM without audio. Poll the returned recording
 URL until `completed`, then download its `url` field.
+
+The video `aspect_ratio` and dimensions control only the WebM canvas. Score engraving always
+uses portrait A4 (`A4_P`) inside that canvas. `paper_size` controls only the displayed A4
+zoom and accepts `fit`, `small`, `medium`, or `large`; it does not change measure/system
+breaks. The same A4 display-size choices are available on `/demo` and `/tasks/{task_id}`.
 
 ---
 

@@ -32,6 +32,8 @@ def build_mcp_http_app(task_manager) -> tuple[Any, Any]:
         device: str = "cuda",
         source_mode: str = "full_mix",
         grid: str = "1/16",
+        beats_per_measure: int = 4,
+        beat_unit: int = 4,
         fps: int = 100,
         thresholds: Optional[dict[str, float]] = None,
     ) -> dict[str, Any]:
@@ -43,6 +45,8 @@ def build_mcp_http_app(task_manager) -> tuple[Any, Any]:
             device=device,
             source_mode=source_mode,
             grid=grid,
+            beats_per_measure=beats_per_measure,
+            beat_unit=beat_unit,
             fps=fps,
             thresholds=thresholds,
         )
@@ -64,6 +68,7 @@ def build_mcp_http_app(task_manager) -> tuple[Any, Any]:
         aspect_ratio: str = "16:9",
         width: int = 1920,
         height: Optional[int] = None,
+        paper_size: str = "fit",
     ) -> dict[str, Any]:
         """Queue a silent WebM recording of a completed dynamic score."""
         return task_manager.create_recording(
@@ -72,6 +77,7 @@ def build_mcp_http_app(task_manager) -> tuple[Any, Any]:
             aspect_ratio=aspect_ratio,
             width=width,
             height=height,
+            paper_size=paper_size,
         )
 
     @server.tool()

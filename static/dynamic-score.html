@@ -23,17 +23,17 @@
   #clock { font:13px ui-monospace,SFMono-Regular,Consolas,monospace; min-width:102px; text-align:right; }
   select { color:var(--text); background:#252932; border:1px solid var(--line); border-radius:4px; padding:6px; }
   #viewport { overflow:auto; background:#d9dce2; scroll-behavior:smooth; position:relative; }
-  #sheet-wrap { width:calc(100% - 28px); max-width:none; min-height:100%; margin:14px 0 14px 14px; padding:22px 28px 60px; background:#fff; box-shadow:0 3px 20px #0005; }
+  #sheet-wrap { width:calc(100% - 28px); max-width:none; min-height:calc((100vw - 28px) * 1.4142); margin:14px auto; padding:22px 28px 60px; background:#fff; box-shadow:0 3px 20px #0005; }
   #sheet { color:#000; }
   #message { position:absolute; inset:0; display:grid; place-items:center; padding:30px; text-align:center; color:var(--dim); background:var(--bg); z-index:5; }
   #message.hidden { display:none; }
   body.recording { grid-template-rows:1fr; }
   body.recording header, body.recording #controls { display:none; }
   body.recording #viewport { grid-row:1; }
-  body.recording #sheet-wrap { width:calc(100% - 24px); max-width:none; margin:12px 0 12px 12px; padding:18px 22px 45px; }
+  body.recording #sheet-wrap { width:calc(100% - 24px); max-width:none; margin:12px auto; padding:18px 22px 45px; }
   @media (max-width:700px) {
     #controls { grid-template-columns:auto auto 1fr auto; gap:7px; padding:7px; }
-    #speed, #density { display:none; }
+    #speed, #paper-size { display:none; }
     #sheet-wrap { width:100%; margin:0; padding:12px 8px 40px; }
     header { padding:7px 10px; }
   }
@@ -51,7 +51,7 @@
   <input id="seek" type="range" min="0" max="1" step="0.01" value="0" disabled>
   <span id="clock">00:00 / 00:00</span>
   <label id="speed">Speed <select><option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option></select></label>
-  <label id="density">音符间距 <select><option value="1">标准</option><option value="1.3" selected>宽松</option><option value="1.6">很宽</option></select></label>
+  <label id="paper-size">A4 显示 <select><option value="fit">适应窗口</option><option value="small">小</option><option value="medium" selected>中</option><option value="large">大</option></select></label>
 </div>
 <main id="viewport">
   <div id="message">Waiting for the task…</div>
@@ -70,10 +70,10 @@ if (recordingMode) document.body.classList.add("recording");
 const $ = id => document.getElementById(id);
 const audio = $("audio"), play = $("play"), stop = $("stop"), seek = $("seek");
 const viewport = $("viewport"), statusEl = $("status"), message = $("message");
-let osmd = null, meta = null, raf = 0, cursorLastTime = -1, baseSheetWidth = 0;
-const BASE_VOICE_SPACING = 0.85;
-const BASE_VOICE_ADDEND = 3;
-const BASE_NOTE_DISTANCE = 2;
+let osmd = null, meta = null, raf = 0, cursorLastTime = -1;
+const A4_WIDTH_UNITS = 2100;
+const A4_HEIGHT_UNITS = 2970;
+const PAPER_ZOOM = { small: 0.30, medium: 0.40, large: 0.50 };
 
 function fmt(sec) {
   sec = Math.max(0, Number(sec) || 0);
@@ -183,28 +183,33 @@ stop.addEventListener("click", () => {
 });
 seek.addEventListener("input", () => { audio.currentTime = Number(seek.value); placeCursor(audio.currentTime, true); update(); });
 $("speed").querySelector("select").addEventListener("change", e => { audio.playbackRate = Number(e.target.value); });
-async function applyNoteSpacing() {
+function selectedPaperSize() {
+  const fromQuery = params.get("paper_size");
+  return ["fit","small","medium","large"].includes(fromQuery) ? fromQuery : null;
+}
+
+async function applyPaperSize() {
   if (!osmd) return;
-  const factor = Number($("density").querySelector("select").value) || 1;
-  if (!baseSheetWidth) baseSheetWidth = Math.max(680, viewport.clientWidth - 28);
+  const choice = $("paper-size").querySelector("select").value;
+  let zoom = PAPER_ZOOM[choice];
+  if (!zoom) {
+    const availableWidth = Math.max(320, viewport.clientWidth - 28);
+    const availableHeight = Math.max(450, viewport.clientHeight - 28);
+    zoom = Math.min(availableWidth / A4_WIDTH_UNITS, availableHeight / A4_HEIGHT_UNITS);
+  }
 
-  // Scale the available engraving width and the note-spacing rules together.
-  // This keeps approximately the same measures per system while increasing
-  // the physical distance between notes. Wider modes intentionally introduce
-  // horizontal scrolling instead of forcing extra line breaks.
+  // A4_P fixes the engraving/page layout. Zoom changes only the displayed paper
+  // size, so measure/system breaks remain identical at every UI/video size.
+  osmd.Zoom = zoom;
   const wrap = $("sheet-wrap");
-  wrap.style.width = `${Math.round(baseSheetWidth * factor)}px`;
-  osmd.EngravingRules.VoiceSpacingMultiplierVexflow = BASE_VOICE_SPACING * factor;
-  osmd.EngravingRules.VoiceSpacingAddendVexflow = BASE_VOICE_ADDEND * factor;
-  osmd.EngravingRules.MinNoteDistance = BASE_NOTE_DISTANCE * factor;
+  wrap.style.width = `${Math.round(A4_WIDTH_UNITS * zoom + 56)}px`;
+  wrap.style.minHeight = `${Math.round(A4_HEIGHT_UNITS * zoom + 82)}px`;
 
-  // Wait for the new width to be committed before asking OSMD to calculate.
-  // Rendering synchronously here caused each selection to apply one change late.
   await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
   osmd.render();
   placeCursor(audio.currentTime || 0, true);
 }
-$("density").querySelector("select").addEventListener("change", applyNoteSpacing);
+$("paper-size").querySelector("select").addEventListener("change", applyPaperSize);
 audio.addEventListener("ended", () => {
   play.textContent = "Play";
   window.__DRUMLAB_SCORE_FINISHED__ = true;
@@ -219,12 +224,14 @@ audio.addEventListener("ended", () => {
     if (!xmlResponse.ok) throw new Error("Could not load MusicXML");
     const xml = await xmlResponse.text();
     osmd = new opensheetmusicdisplay.OpenSheetMusicDisplay("sheet", {
-      autoResize: true, backend: "svg", drawTitle: false, drawPartNames: false,
-      followCursor: false,
+      autoResize: false, backend: "svg", drawTitle: false, drawPartNames: false,
+      followCursor: false, pageFormat: "A4_P", pageBackgroundColor: "#ffffff",
     });
     await osmd.load(xml);
-    baseSheetWidth = Math.max(680, viewport.clientWidth - 28);
-    await applyNoteSpacing();
+    const requestedPaperSize = selectedPaperSize();
+    if (requestedPaperSize) $("paper-size").querySelector("select").value = requestedPaperSize;
+    if (recordingMode && !requestedPaperSize) $("paper-size").querySelector("select").value = "fit";
+    await applyPaperSize();
     osmd.cursor.show();
     audio.src = `/api/tasks/${encodeURIComponent(taskId)}/audio`;
     await new Promise((resolve, reject) => {
