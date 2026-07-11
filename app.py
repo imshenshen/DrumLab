@@ -26,6 +26,7 @@ import sys
 import threading
 import webbrowser
 from collections import OrderedDict, deque
+from contextlib import asynccontextmanager
 from fractions import Fraction
 from pathlib import Path
 from typing import Optional
@@ -35,7 +36,10 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-APP_VERSION = "7.2"
+from mcp_integration import build_mcp_http_app
+from task_service import get_task_manager
+
+APP_VERSION = "8.0"
 APP_DIR = Path(__file__).resolve().parent
 WORK = APP_DIR / "workdir"
 UPLOADS = WORK / "uploads"
@@ -45,6 +49,8 @@ OUT = WORK / "out"
 DEMUCS_TMP = WORK / "demucs_tmp"
 for d in (UPLOADS, STEMS, ACTS, OUT, DEMUCS_TMP):
     d.mkdir(parents=True, exist_ok=True)
+
+TASKS = get_task_manager(APP_DIR, sys.executable)
 
 PYEXE = sys.executable
 WORKER = APP_DIR / "adtof_worker.py"
@@ -596,7 +602,27 @@ def build_musicxml(events: dict, tempo: float, grid: str, path: Path) -> None:
 # ---------------------------------------------------------------------------
 # API
 # ---------------------------------------------------------------------------
-app = FastAPI(title="DrumLab", version=APP_VERSION, docs_url=None, redoc_url=None)
+MCP_SERVER, MCP_HTTP_APP = build_mcp_http_app(TASKS)
+
+
+@asynccontextmanager
+async def app_lifespan(_app):
+    if MCP_SERVER is None:
+        yield
+        return
+    # FastMCP's mounted ASGI app does not start its own lifespan.  The parent
+    # FastAPI service owns the session manager lifecycle.
+    async with MCP_SERVER.session_manager.run():
+        yield
+
+
+app = FastAPI(
+    title="DrumLab",
+    version=APP_VERSION,
+    docs_url=None,
+    redoc_url=None,
+    lifespan=app_lifespan,
+)
 
 
 @app.get("/")
@@ -605,6 +631,136 @@ def index():
     # keeps it in sync, but this makes view-source / a stale poll show the real one)
     html = (APP_DIR / "static" / "index.html").read_text(encoding="utf-8")
     return Response(content=html.replace("__VER__", APP_VERSION), media_type="text/html")
+
+
+@app.get("/tasks/{task_id}")
+def dynamic_score_page(task_id: str):
+    try:
+        TASKS.get(task_id)
+    except KeyError:
+        raise HTTPException(404, "Task not found") from None
+    html = (APP_DIR / "static" / "dynamic-score.html").read_text(encoding="utf-8")
+    return Response(content=html, media_type="text/html")
+
+
+@app.get("/demo")
+def task_demo_page():
+    html = (APP_DIR / "static" / "demo.html").read_text(encoding="utf-8")
+    return Response(content=html.replace("__VER__", APP_VERSION), media_type="text/html")
+
+
+@app.post("/api/tasks")
+def create_task(params: dict):
+    """Queue a local-path pipeline. No file bytes are uploaded through HTTP."""
+    try:
+        task = TASKS.submit(
+            params.get("audio_path", ""),
+            params.get("service_port"),
+            model=params.get("model", "htdemucs"),
+            device=params.get("device", "cuda"),
+            source_mode=params.get("source_mode", "full_mix"),
+            grid=params.get("grid", "1/16"),
+            fps=params.get("fps", 100),
+            thresholds=params.get("thresholds"),
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+    return task
+
+
+@app.get("/api/tasks")
+def list_tasks(limit: int = 100):
+    return {"tasks": TASKS.list(limit)}
+
+
+@app.get("/api/tasks/{task_id}")
+def get_task(task_id: str):
+    try:
+        return TASKS.get(task_id)
+    except KeyError:
+        raise HTTPException(404, "Task not found") from None
+
+
+def _task_artifact(task_id: str, name: str) -> Path:
+    try:
+        return TASKS.artifact(task_id, name)
+    except KeyError:
+        raise HTTPException(404, "Task or artifact not found") from None
+    except FileNotFoundError:
+        raise HTTPException(404, "Artifact not found") from None
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from None
+
+
+@app.get("/api/tasks/{task_id}/audio")
+def task_audio(task_id: str):
+    return FileResponse(_task_artifact(task_id, "audio"), media_type="audio/wav",
+                        headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/tasks/{task_id}/musicxml")
+def task_musicxml(task_id: str):
+    path = _task_artifact(task_id, "musicxml")
+    return FileResponse(path, media_type="application/vnd.recordare.musicxml+xml",
+                        filename=f"{task_id}.musicxml", headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/tasks/{task_id}/events")
+def task_events(task_id: str):
+    return FileResponse(_task_artifact(task_id, "events"), media_type="application/json",
+                        headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/tasks/{task_id}/midi")
+def task_midi(task_id: str):
+    return FileResponse(_task_artifact(task_id, "midi"), media_type="audio/midi",
+                        filename=f"{task_id}.mid", headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/tasks/{task_id}/recordings")
+def create_task_recording(task_id: str, params: dict):
+    try:
+        return TASKS.create_recording(
+            task_id,
+            params.get("service_port"),
+            aspect_ratio=params.get("aspect_ratio", "16:9"),
+            width=params.get("width", 1920),
+            height=params.get("height"),
+        )
+    except KeyError:
+        raise HTTPException(404, "Task not found") from None
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+
+
+@app.get("/api/tasks/{task_id}/recordings/{recording_id}")
+def get_task_recording(task_id: str, recording_id: str):
+    try:
+        return TASKS.get_recording(task_id, recording_id)
+    except KeyError:
+        raise HTTPException(404, "Recording not found") from None
+
+
+@app.get("/api/tasks/{task_id}/recordings/{recording_id}/video")
+def task_recording_video(task_id: str, recording_id: str):
+    try:
+        path = TASKS.recording_file(task_id, recording_id)
+    except KeyError:
+        raise HTTPException(404, "Recording not found") from None
+    except FileNotFoundError:
+        raise HTTPException(404, "Recording file not found") from None
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from None
+    return FileResponse(path, media_type="video/webm", filename=f"{task_id}-dynamic-score.webm")
+
+
+@app.get("/api/mcp/status")
+def mcp_status():
+    return {
+        "enabled": MCP_HTTP_APP is not None,
+        "endpoint": "/mcp/" if MCP_HTTP_APP is not None else None,
+        "install": None if MCP_HTTP_APP is not None else "Install the 'mcp' package and restart DrumLab",
+    }
 
 
 def probe_tags(path: Path) -> dict:
@@ -1289,6 +1445,8 @@ def download(kind: str, grid: str = "1/16", fmt: str = "wav", speed: float = 1.0
     raise HTTPException(404, "Unknown download kind")
 
 
+if MCP_HTTP_APP is not None:
+    app.mount("/mcp", MCP_HTTP_APP, name="mcp")
 app.mount("/static", StaticFiles(directory=APP_DIR / "static"), name="static")
 
 
@@ -1337,6 +1495,9 @@ def main() -> None:
     ap.add_argument("--library", action="append", default=[], metavar="FOLDER",
                     help="Folder to index for the song library / party shuffle "
                          "(repeatable). If omitted, pick one from the UI.")
+    ap.add_argument("--task-root", action="append", default=[], metavar="FOLDER",
+                    help="Restrict agent task audio paths to this folder (repeatable). "
+                         "If omitted, any readable absolute audio path is accepted.")
     args = ap.parse_args()
 
     if args.preload:
@@ -1344,6 +1505,11 @@ def main() -> None:
 
     if args.port is None:
         args.port = _first_free_port(args.host, 8765)
+
+    try:
+        TASKS.configure(args.port, args.task_root)
+    except (OSError, RuntimeError) as exc:
+        raise SystemExit(f"Invalid --task-root: {exc}") from exc
 
     for root in args.library:
         try:

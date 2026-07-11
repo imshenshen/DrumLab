@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DrumLab — Dynamic Score</title>
+<script src="/static/vendor/opensheetmusicdisplay.min.js"></script>
+<style>
+  :root { --bg:#101216; --panel:#1d2026; --line:#303540; --text:#e5e8ee; --dim:#9299a8; --blue:#4ea1ff; --green:#2f9e57; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; width:100%; height:100%; overflow:hidden; background:var(--bg); color:var(--text); font:14px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif; }
+  body { display:grid; grid-template-rows:auto auto 1fr; }
+  header { display:flex; align-items:center; gap:14px; min-height:54px; padding:8px 18px; background:var(--panel); border-bottom:1px solid var(--line); }
+  h1 { margin:0; color:var(--blue); font-size:15px; letter-spacing:2px; text-transform:uppercase; }
+  #title { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--dim); }
+  #status { margin-left:auto; white-space:nowrap; color:var(--dim); }
+  #status.ready { color:#55c77a; }
+  #controls { display:grid; grid-template-columns:auto auto minmax(100px,1fr) auto auto; align-items:center; gap:12px; padding:9px 18px; background:#17191e; border-bottom:1px solid var(--line); }
+  button { border:0; border-radius:5px; padding:8px 18px; color:white; background:var(--green); cursor:pointer; font-weight:700; }
+  button:disabled { opacity:.4; cursor:default; }
+  #stop { background:#a84343; }
+  input[type=range] { width:100%; accent-color:var(--blue); }
+  #clock { font:13px ui-monospace,SFMono-Regular,Consolas,monospace; min-width:102px; text-align:right; }
+  select { color:var(--text); background:#252932; border:1px solid var(--line); border-radius:4px; padding:6px; }
+  #viewport { overflow:auto; background:#d9dce2; scroll-behavior:smooth; position:relative; }
+  #sheet-wrap { width:min(1180px,calc(100% - 28px)); min-height:100%; margin:14px auto; padding:22px 28px 60px; background:#fff; box-shadow:0 3px 20px #0005; }
+  #sheet { color:#000; }
+  #message { position:absolute; inset:0; display:grid; place-items:center; padding:30px; text-align:center; color:var(--dim); background:var(--bg); z-index:5; }
+  #message.hidden { display:none; }
+  body.recording { grid-template-rows:1fr; }
+  body.recording header, body.recording #controls { display:none; }
+  body.recording #viewport { grid-row:1; }
+  body.recording #sheet-wrap { width:calc(100% - 24px); margin:12px auto; padding:18px 22px 45px; }
+  @media (max-width:700px) {
+    #controls { grid-template-columns:auto auto 1fr auto; gap:7px; padding:7px; }
+    #speed { display:none; }
+    #sheet-wrap { width:100%; margin:0; padding:12px 8px 40px; }
+    header { padding:7px 10px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>DrumLab</h1>
+  <span id="title">Dynamic drum score</span>
+  <span id="status">Loading task…</span>
+</header>
+<div id="controls">
+  <button id="play" disabled>Play</button>
+  <button id="stop" disabled>Stop</button>
+  <input id="seek" type="range" min="0" max="1" step="0.01" value="0" disabled>
+  <span id="clock">00:00 / 00:00</span>
+  <label id="speed">Speed <select><option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option></select></label>
+</div>
+<main id="viewport">
+  <div id="message">Waiting for the task…</div>
+  <div id="sheet-wrap"><div id="sheet"></div></div>
+</main>
+<audio id="audio" preload="auto"></audio>
+<script>
+"use strict";
+window.__DRUMLAB_SCORE_READY__ = false;
+window.__DRUMLAB_SCORE_FINISHED__ = false;
+
+const taskId = decodeURIComponent(location.pathname.split("/").filter(Boolean).pop());
+const params = new URLSearchParams(location.search);
+const recordingMode = params.get("recording") === "1";
+if (recordingMode) document.body.classList.add("recording");
+const $ = id => document.getElementById(id);
+const audio = $("audio"), play = $("play"), stop = $("stop"), seek = $("seek");
+const viewport = $("viewport"), statusEl = $("status"), message = $("message");
+let osmd = null, meta = null, raf = 0, cursorLastTime = -1;
+
+function fmt(sec) {
+  sec = Math.max(0, Number(sec) || 0);
+  const m = Math.floor(sec / 60), s = Math.floor(sec % 60);
+  return String(m).padStart(2,"0") + ":" + String(s).padStart(2,"0");
+}
+
+async function json(url, options) {
+  const response = await fetch(url, options);
+  if (!response.ok) {
+    let detail = response.statusText;
+    try { detail = (await response.json()).detail || detail; } catch (_) {}
+    throw new Error(detail);
+  }
+  return response.json();
+}
+
+async function waitForTask() {
+  while (true) {
+    const task = await json(`/api/tasks/${encodeURIComponent(taskId)}`);
+    $("title").textContent = task.source_name || task.id;
+    statusEl.textContent = `${task.status} · ${task.stage} · ${Math.round((task.progress || 0) * 100)}%`;
+    message.textContent = task.error || task.message || "Waiting for the task…";
+    if (task.status === "completed") return task;
+    if (task.status === "failed") throw new Error(task.error || "Task failed");
+    await new Promise(resolve => setTimeout(resolve, 1200));
+  }
+}
+
+function cursorTimestamp() {
+  try {
+    const iterator = osmd.cursor.iterator;
+    const stamp = iterator.currentTimeStamp || iterator.CurrentTimeStamp;
+    const quarters = stamp.realValue ?? stamp.RealValue;
+    return Number(quarters) * 60 / Number(meta.tempo);
+  } catch (_) { return Infinity; }
+}
+
+function nextCursor() {
+  try {
+    osmd.cursor.next();
+    return !osmd.cursor.iterator.endReached;
+  } catch (_) { return false; }
+}
+
+function placeCursor(seconds, forceReset = false) {
+  if (!osmd || !meta) return;
+  if (forceReset || seconds + 0.05 < cursorLastTime) {
+    osmd.cursor.reset();
+    osmd.cursor.show();
+  }
+  let guard = 0;
+  while (cursorTimestamp() <= seconds + 0.025 && guard++ < 20000) {
+    if (!nextCursor()) break;
+  }
+  cursorLastTime = seconds;
+  const element = osmd.cursor.cursorElement || document.querySelector("[id^=cursorImg]");
+  if (element) {
+    const box = element.getBoundingClientRect();
+    const view = viewport.getBoundingClientRect();
+    const target = viewport.scrollTop + box.top - view.top - view.height * 0.30;
+    if (Math.abs(target - viewport.scrollTop) > view.height * 0.12) viewport.scrollTo({top:Math.max(0,target),behavior:"smooth"});
+  }
+}
+
+function update() {
+  seek.value = String(audio.currentTime || 0);
+  $("clock").textContent = `${fmt(audio.currentTime)} / ${fmt(audio.duration || meta?.duration)}`;
+  placeCursor(audio.currentTime || 0);
+  if (!audio.paused && !audio.ended) raf = requestAnimationFrame(update);
+}
+
+play.addEventListener("click", async () => {
+  if (audio.paused) {
+    await audio.play();
+    play.textContent = "Pause";
+    cancelAnimationFrame(raf); update();
+  } else {
+    audio.pause(); play.textContent = "Play";
+  }
+});
+stop.addEventListener("click", () => {
+  audio.pause(); audio.currentTime = 0; play.textContent = "Play";
+  placeCursor(0, true); viewport.scrollTop = 0; update();
+});
+seek.addEventListener("input", () => { audio.currentTime = Number(seek.value); placeCursor(audio.currentTime, true); update(); });
+$("speed").querySelector("select").addEventListener("change", e => { audio.playbackRate = Number(e.target.value); });
+audio.addEventListener("ended", () => {
+  play.textContent = "Play";
+  window.__DRUMLAB_SCORE_FINISHED__ = true;
+  update();
+});
+
+(async () => {
+  try {
+    const task = await waitForTask();
+    meta = await json(`/api/tasks/${encodeURIComponent(taskId)}/events`);
+    const xmlResponse = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/musicxml`);
+    if (!xmlResponse.ok) throw new Error("Could not load MusicXML");
+    const xml = await xmlResponse.text();
+    osmd = new opensheetmusicdisplay.OpenSheetMusicDisplay("sheet", {
+      autoResize: true, backend: "svg", drawTitle: false, drawPartNames: false,
+      followCursor: false,
+    });
+    await osmd.load(xml);
+    osmd.render();
+    osmd.cursor.show();
+    audio.src = `/api/tasks/${encodeURIComponent(taskId)}/audio`;
+    await new Promise((resolve, reject) => {
+      if (audio.readyState >= 1) return resolve();
+      audio.addEventListener("loadedmetadata", resolve, {once:true});
+      audio.addEventListener("error", () => reject(new Error("Could not load task audio")), {once:true});
+    });
+    seek.max = String(audio.duration || meta.duration || 1);
+    play.disabled = stop.disabled = seek.disabled = false;
+    message.classList.add("hidden");
+    statusEl.textContent = `${meta.tempo.toFixed(1)} BPM · ${Object.values(meta.counts).reduce((a,b)=>a+b,0)} hits`;
+    statusEl.classList.add("ready");
+    placeCursor(0, true); update();
+    window.__DRUMLAB_SCORE_READY__ = true;
+  } catch (error) {
+    statusEl.textContent = "Error";
+    message.textContent = error.message;
+  }
+})();
+</script>
+</body>
+</html>

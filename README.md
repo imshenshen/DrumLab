@@ -29,6 +29,11 @@ offline, nothing leaves your computer.
   meters (dBFS), and a pitch-preserved playback-speed knob.
 - **Export** — stems in FLAC / WAV / AAC / ALAC / AIFF / OGG, plus MIDI, quantized MIDI,
   and MusicXML. Optionally export at the current playback speed.
+- **Persistent tasks + dynamic score** — queue server-local audio paths, receive a task ID,
+  and open `/tasks/{task_id}` for audio-synchronised notation with a moving cursor and
+  automatic scrolling.
+- **Agent/MCP API** — Streamable HTTP MCP tools at `/mcp/` create and inspect tasks and
+  request silent dynamic-score recordings.
 
 ---
 
@@ -48,6 +53,8 @@ Everything installs into a single Python environment:
   sibling checkout at `../ADTOF-pytorch/src/adtof_pytorch`.
 - **FastAPI + Uvicorn + python-multipart + music21** — the web server and MusicXML export.
   These are pure-Python and don't touch torch.
+- **MCP Python SDK** — agent-facing Streamable HTTP tools.
+- **Playwright Chromium** — only needed by the optional silent score-recording API.
 
 ---
 
@@ -87,8 +94,9 @@ Everything installs into a single Python environment:
 
     If you cloned ADTOF-pytorch as a sibling folder instead, you can skip the second command.
    ```sh
-   pip install demucs fastapi uvicorn python-multipart music21
+   pip install demucs fastapi uvicorn python-multipart music21 "mcp>=1.27,<2" playwright
    pip install --no-deps git+https://github.com/xavriley/ADTOF-pytorch.git
+   playwright install chromium     # only required for automatic video recording
    ```
 
    <sub>*`--no-deps` stops pip from reinstalling torch over the CUDA build from step 3.*</sub>
@@ -123,6 +131,7 @@ This starts the server on `127.0.0.1:8765` and opens it in your default browser.
 | `--no-browser` | don't open a browser window |
 | `--preload` | download all Demucs models, then exit |
 | `--library FOLDER` | index a folder for the song library / party shuffle (repeatable) |
+| `--task-root FOLDER` | restrict agent-supplied audio paths to this folder (repeatable) |
 
 > **Song library.** The party-shuffle / up-next browser indexes folders you point it at.
 > Pass `--library FOLDER` (repeatable) to index one or more folders at startup — e.g.
@@ -135,6 +144,61 @@ This starts the server on `127.0.0.1:8765` and opens it in your default browser.
 > sees and edits that *same* workspace. Loading a song on your phone replaces what's
 > on your PC. This is by design; don't run two clients against one server expecting
 > independent sessions.
+
+## Agent tasks and dynamic scores
+
+The task API is separate from the legacy shared GUI workspace. Tasks are persistent under
+`workdir/tasks/<task-id>`, and the GPU pipeline is intentionally single-file so concurrent
+agents cannot start competing Demucs/ADTOF processes.
+
+Create a task from an absolute path that exists **on the DrumLab server**:
+
+```sh
+curl -X POST http://127.0.0.1:8765/api/tasks \
+  -H 'content-type: application/json' \
+  -d '{"audio_path":"/music/song.flac","service_port":8765}'
+```
+
+If the source is already a drum-only recording, skip Demucs and start directly at ADTOF:
+
+```sh
+curl -X POST http://127.0.0.1:8765/api/tasks \
+  -H 'content-type: application/json' \
+  -d '{"audio_path":"/music/drums.wav","service_port":8765,"source_mode":"drum_only"}'
+```
+
+`source_mode` accepts `full_mix` (default, Demucs then ADTOF) or `drum_only` (decode then
+ADTOF directly). The same argument is available in the MCP `create_drum_score_task` tool
+and in the `/demo` form.
+
+The response contains a task ID and `queued` or `running` status. Poll
+`GET /api/tasks/{task_id}` until `completed`, then open `/tasks/{task_id}`. Artifacts are
+available from the URL map in the task response. The supplied `service_port` must match the
+actual DrumLab port; this prevents an agent from accidentally submitting work to the wrong
+local service. Use one or more `--task-root` flags to prevent agents from reading audio
+outside approved directories.
+
+For manual operation, open `http://HOST:PORT/demo`. This page submits local-path tasks,
+polls the complete task queue, opens completed dynamic scores, exports MusicXML/MIDI, and
+starts or downloads silent WebM recordings in 16:9, 9:16, 4:3, or 1:1.
+
+MCP clients connect to `http://HOST:PORT/mcp/` and receive these tools:
+
+- `create_drum_score_task`
+- `get_drum_score_task`
+- `create_dynamic_score_recording`
+- `get_dynamic_score_recording`
+
+Create a silent recording after the task completes:
+
+```sh
+curl -X POST http://127.0.0.1:8765/api/tasks/TASK_ID/recordings \
+  -H 'content-type: application/json' \
+  -d '{"service_port":8765,"aspect_ratio":"9:16","width":1080}'
+```
+
+Recording runs asynchronously and produces a WebM without audio. Poll the returned recording
+URL until `completed`, then download its `url` field.
 
 ---
 
