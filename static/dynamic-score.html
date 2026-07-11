@@ -32,9 +32,13 @@
   #sheet { color:#000; }
   #message { position:absolute; inset:0; display:grid; place-items:center; padding:30px; text-align:center; color:var(--dim); background:var(--bg); z-index:5; }
   #message.hidden { display:none; }
+  html.recording, body.recording { background:#fff; }
   body.recording { grid-template-rows:1fr; }
   body.recording header, body.recording #controls, body.recording #notation-controls { display:none; }
-  body.recording #viewport { grid-row:1; background:#fff; }
+  body.recording #viewport {
+    position:fixed; inset:0; width:100%; height:100%;
+    grid-row:1; background:#fff;
+  }
   body.recording #sheet-wrap { width:calc(100% - 24px); max-width:none; margin:12px auto; padding:18px 22px 45px; }
   body.recording [id^="cursorImg"] { opacity:.38; }
   @media (max-width:700px) {
@@ -87,7 +91,10 @@ const params = new URLSearchParams(location.search);
 const recordingKind = params.get("recording");
 const recordingMode = recordingKind === "1" || recordingKind === "offline";
 const offlineRecordingMode = recordingKind === "offline";
-if (recordingMode) document.body.classList.add("recording");
+if (recordingMode) {
+  document.documentElement.classList.add("recording");
+  document.body.classList.add("recording");
+}
 const $ = id => document.getElementById(id);
 const audio = $("audio"), play = $("play"), stop = $("stop"), seek = $("seek");
 const viewport = $("viewport"), statusEl = $("status"), message = $("message");
@@ -229,10 +236,20 @@ window.__DRUMLAB_EXPORT_TIMELINE__ = () => {
   }
   osmd.cursor.hide();
   cursorLastTime = -1;
+  // Playwright includes overflowing descendants in an element screenshot, but
+  // the element's white background is painted only within its own box. Extend
+  // the paper through the final cursor position before the offline screenshot,
+  // otherwise the overflow area is captured against the dark page background.
+  const lastContentBottom = points.reduce(
+    (bottom, point) => Math.max(bottom, point.y + point.height),
+    0,
+  );
+  const contentHeight = Math.ceil(Math.max(wrap.scrollHeight, lastContentBottom + 45));
+  wrap.style.height = `${contentHeight}px`;
   return {
     points,
     width: Math.ceil(wrap.scrollWidth),
-    height: Math.ceil(wrap.scrollHeight),
+    height: contentHeight,
     duration: Number(audio.duration || meta.duration || 0),
   };
 };
