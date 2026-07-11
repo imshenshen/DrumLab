@@ -1493,7 +1493,12 @@ class TaskManager:
             if key in ("out_time_us", "out_time_ms"):
                 # Modern FFmpeg reports both fields in microseconds despite the
                 # historical out_time_ms name.
-                rendered_seconds = max(rendered_seconds, float(value) / 1_000_000.0)
+                try:
+                    progress_time = float(value)
+                except (TypeError, ValueError):
+                    progress_time = None
+                if progress_time is not None and math.isfinite(progress_time):
+                    rendered_seconds = max(rendered_seconds, progress_time / 1_000_000.0)
             now = time.monotonic()
             if now - last_progress_log >= 5.0:
                 progress = min(1.0, rendered_seconds / duration)
