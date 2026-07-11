@@ -264,6 +264,9 @@ window.__DRUMLAB_EXPORT_TIMELINE__ = () => {
   return {
     points,
     pages,
+    wrapX: sheetBox.left - viewport.getBoundingClientRect().left,
+    wrapY: sheetBox.top - viewport.getBoundingClientRect().top + viewport.scrollTop,
+    captureHeight: Math.ceil(viewport.scrollHeight),
     width: Math.ceil(wrap.scrollWidth),
     height: contentHeight,
     duration: Number(audio.duration || meta.duration || 0),

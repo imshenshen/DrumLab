@@ -1335,6 +1335,7 @@ class TaskManager:
         )
         score_png = folder / "score.png"
         page_pngs: list[Path] = []
+        tile_tops: list[int] = []
         engrave_started = time.monotonic()
         record_log("engraving score in Chromium")
         with sync_playwright() as playwright:
@@ -1353,45 +1354,44 @@ class TaskManager:
             )
             page.wait_for_function("window.__DRUMLAB_SCORE_READY__ === true", timeout=120000)
             timeline = page.evaluate("window.__DRUMLAB_EXPORT_TIMELINE__()")
-            page_locators = page.locator("#sheet svg")
-            page_count = page_locators.count()
-            if page_count == 0:
-                raise RuntimeError("OSMD did not render any SVG score pages")
-            for page_index in range(page_count):
-                page_png = folder / f"score-page-{page_index}.png"
-                page_locators.nth(page_index).screenshot(path=str(page_png))
+            capture_height = int(timeline.get("captureHeight") or timeline.get("height") or 0)
+            tile_height = int(recording["height"])
+            if capture_height <= 0:
+                raise RuntimeError("OSMD did not expose a valid capture height")
+            max_scroll = max(0, capture_height - tile_height)
+            tile_tops = list(range(0, max_scroll + 1, tile_height))
+            if not tile_tops or tile_tops[-1] != max_scroll:
+                tile_tops.append(max_scroll)
+            for tile_top in tile_tops:
+                page.evaluate("top => { document.getElementById('viewport').scrollTop = top; }", tile_top)
+                page.wait_for_timeout(20)
+                page_png = folder / f"score-tile-{tile_top}.png"
+                page.locator("#viewport").screenshot(path=str(page_png))
                 page_pngs.append(page_png)
             context.close()
             browser.close()
         record_log(
-            f"{len(page_pngs)} score page(s) captured in "
+            f"{len(page_pngs)} score tile(s) captured in "
             f"{time.monotonic() - engrave_started:.1f}s"
         )
 
         points = timeline.get("points") or []
         if not points:
             raise RuntimeError("The score did not expose any cursor positions")
-        css_score_size = (
-            max(1, int(round(float(timeline.get("width") or recording["width"])))),
-            max(1, int(round(float(timeline.get("height") or recording["height"])))),
-        )
+        css_score_size = (int(recording["width"]), int(timeline["captureHeight"]))
         score = Image.new("RGB", css_score_size, (255, 255, 255))
-        page_boxes = timeline.get("pages") or []
-        if len(page_boxes) != len(page_pngs):
-            raise RuntimeError("OSMD page metadata does not match captured SVG pages")
         resampling = getattr(Image, "Resampling", Image)
-        for page_box, page_png in zip(page_boxes, page_pngs):
-            engraved_page = Image.open(page_png).convert("RGB")
-            page_size = (
-                max(1, int(round(float(page_box["width"])))),
-                max(1, int(round(float(page_box["height"])))),
-            )
-            if engraved_page.size != page_size:
-                engraved_page = engraved_page.resize(page_size, resampling.LANCZOS)
-            score.paste(
-                engraved_page,
-                (int(round(float(page_box["x"]))), int(round(float(page_box["y"])))),
-            )
+        tile_height = int(recording["height"])
+        for tile_top, page_png in zip(tile_tops, page_pngs):
+            tile = Image.open(page_png).convert("RGB")
+            expected_size = (int(recording["width"]), tile_height)
+            if tile.size != expected_size:
+                tile = tile.resize(expected_size, resampling.LANCZOS)
+            remaining = css_score_size[1] - tile_top
+            if remaining < tile.height:
+                tile = tile.crop((0, 0, tile.width, max(0, remaining)))
+            if tile.height > 0:
+                score.paste(tile, (0, tile_top))
         width, height = int(recording["width"]), int(recording["height"])
         fps = int(recording.get("fps", 30))
         audio_duration = max(
@@ -1410,7 +1410,8 @@ class TaskManager:
         # A fit-to-width sheet can be a few CSS pixels wider than the even video
         # dimensions. Pad only when the sheet is narrower; otherwise crop the
         # wider sheet symmetrically. Use the same offset for cursor coordinates.
-        sheet_x = (width - score.width) / 2.0
+        sheet_x = float(timeline.get("wrapX") or 0)
+        sheet_origin_y = float(timeline.get("wrapY") or 0)
         sheet_top = 12
         max_scroll = max(0, score.height - height + sheet_top * 2)
         samples: list[tuple[float, float, float, float]] = []
@@ -1421,7 +1422,7 @@ class TaskManager:
                 timestamp,
                 target_scroll,
                 sheet_x + float(point["x"]),
-                sheet_top + float(point["y"]),
+                sheet_origin_y + float(point["y"]),
             ))
         samples.sort(key=lambda item: item[0])
         collapsed_samples: list[tuple[float, float, float, float]] = []
