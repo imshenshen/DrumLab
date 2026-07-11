@@ -15,7 +15,7 @@
   #title { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--dim); }
   #status { margin-left:auto; white-space:nowrap; color:var(--dim); }
   #status.ready { color:#55c77a; }
-  #controls { display:grid; grid-template-columns:auto auto minmax(100px,1fr) auto auto; align-items:center; gap:12px; padding:9px 18px; background:#17191e; border-bottom:1px solid var(--line); }
+  #controls { display:grid; grid-template-columns:auto auto minmax(100px,1fr) auto auto auto; align-items:center; gap:12px; padding:9px 18px; background:#17191e; border-bottom:1px solid var(--line); }
   button { border:0; border-radius:5px; padding:8px 18px; color:white; background:var(--green); cursor:pointer; font-weight:700; }
   button:disabled { opacity:.4; cursor:default; }
   #stop { background:#a84343; }
@@ -23,17 +23,17 @@
   #clock { font:13px ui-monospace,SFMono-Regular,Consolas,monospace; min-width:102px; text-align:right; }
   select { color:var(--text); background:#252932; border:1px solid var(--line); border-radius:4px; padding:6px; }
   #viewport { overflow:auto; background:#d9dce2; scroll-behavior:smooth; position:relative; }
-  #sheet-wrap { width:min(1180px,calc(100% - 28px)); min-height:100%; margin:14px auto; padding:22px 28px 60px; background:#fff; box-shadow:0 3px 20px #0005; }
+  #sheet-wrap { width:calc(100% - 28px); max-width:780px; min-height:100%; margin:14px auto; padding:22px 28px 60px; background:#fff; box-shadow:0 3px 20px #0005; transition:max-width .18s ease; }
   #sheet { color:#000; }
   #message { position:absolute; inset:0; display:grid; place-items:center; padding:30px; text-align:center; color:var(--dim); background:var(--bg); z-index:5; }
   #message.hidden { display:none; }
   body.recording { grid-template-rows:1fr; }
   body.recording header, body.recording #controls { display:none; }
   body.recording #viewport { grid-row:1; }
-  body.recording #sheet-wrap { width:calc(100% - 24px); margin:12px auto; padding:18px 22px 45px; }
+  body.recording #sheet-wrap { width:calc(100% - 24px); max-width:780px; margin:12px auto; padding:18px 22px 45px; }
   @media (max-width:700px) {
     #controls { grid-template-columns:auto auto 1fr auto; gap:7px; padding:7px; }
-    #speed { display:none; }
+    #speed, #density { display:none; }
     #sheet-wrap { width:100%; margin:0; padding:12px 8px 40px; }
     header { padding:7px 10px; }
   }
@@ -51,6 +51,7 @@
   <input id="seek" type="range" min="0" max="1" step="0.01" value="0" disabled>
   <span id="clock">00:00 / 00:00</span>
   <label id="speed">Speed <select><option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option></select></label>
+  <label id="density">谱面密度 <select><option value="780" selected>稀疏</option><option value="1000">标准</option><option value="1280">紧凑</option></select></label>
 </div>
 <main id="viewport">
   <div id="message">Waiting for the task…</div>
@@ -117,6 +118,13 @@ function nextCursor() {
   } catch (_) { return false; }
 }
 
+function previousCursor() {
+  try {
+    osmd.cursor.previous();
+    return true;
+  } catch (_) { return false; }
+}
+
 function placeCursor(seconds, forceReset = false) {
   if (!osmd || !meta) return;
   if (forceReset || seconds + 0.05 < cursorLastTime) {
@@ -124,8 +132,18 @@ function placeCursor(seconds, forceReset = false) {
     osmd.cursor.show();
   }
   let guard = 0;
-  while (cursorTimestamp() <= seconds + 0.025 && guard++ < 20000) {
+  // Keep the cursor at the latest score position at-or-before audio.currentTime.
+  // The old loop advanced while current <= target, leaving the cursor one event
+  // ahead. That became especially visible after seeking on the progress bar.
+  while (cursorTimestamp() < seconds - 0.025 && guard++ < 20000) {
+    const before = cursorTimestamp();
     if (!nextCursor()) break;
+    const after = cursorTimestamp();
+    if (after > seconds + 0.025) {
+      previousCursor();
+      break;
+    }
+    if (after <= before) break;
   }
   cursorLastTime = seconds;
   const element = osmd.cursor.cursorElement || document.querySelector("[id^=cursorImg]");
@@ -159,6 +177,13 @@ stop.addEventListener("click", () => {
 });
 seek.addEventListener("input", () => { audio.currentTime = Number(seek.value); placeCursor(audio.currentTime, true); update(); });
 $("speed").querySelector("select").addEventListener("change", e => { audio.playbackRate = Number(e.target.value); });
+$("density").querySelector("select").addEventListener("change", e => {
+  $("sheet-wrap").style.maxWidth = `${Number(e.target.value)}px`;
+  if (osmd) {
+    osmd.render();
+    placeCursor(audio.currentTime || 0, true);
+  }
+});
 audio.addEventListener("ended", () => {
   play.textContent = "Play";
   window.__DRUMLAB_SCORE_FINISHED__ = true;

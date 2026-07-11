@@ -17,6 +17,7 @@ import threading
 import time
 import traceback
 import uuid
+import math
 from datetime import datetime, timezone
 from fractions import Fraction
 from pathlib import Path
@@ -37,6 +38,7 @@ STAFF_MAP = {
     "hihat": ("G", 5, "x"),
     "cymbal": ("A", 5, "x"),
 }
+SCORE_VERSION = 2  # v2 extends notation/rests through the source audio duration
 
 
 def _now() -> str:
@@ -487,7 +489,13 @@ class TaskManager:
             "counts": {name: len(values) for name, values in events.items()},
         }
         (folder / "events.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-        self._build_musicxml(events, float(meta["tempo"]), opts["grid"], folder / "score.musicxml")
+        self._build_musicxml(
+            events,
+            float(meta["tempo"]),
+            opts["grid"],
+            folder / "score.musicxml",
+            duration_seconds=float(meta["duration"]),
+        )
         self._build_midi(events, float(meta["tempo"]), folder / "performance.mid")
         self._check_abort(task_id)
 
@@ -500,6 +508,7 @@ class TaskManager:
             duration=float(meta["duration"]),
             tempo=float(meta["tempo"]),
             hit_counts=payload["counts"],
+            score_version=SCORE_VERSION,
         )
 
     def _post_processing(self):
@@ -529,7 +538,14 @@ class TaskManager:
             result[name] = [(slot, slot * step_sec) for slot in slots]
         return result
 
-    def _build_musicxml(self, events: dict[str, list[float]], tempo: float, grid: str, path: Path) -> None:
+    def _build_musicxml(
+        self,
+        events: dict[str, list[float]],
+        tempo: float,
+        grid: str,
+        path: Path,
+        duration_seconds: Optional[float] = None,
+    ) -> None:
         from music21 import clef, duration as m21dur, meter, note, percussion, stream, tempo as m21tempo
 
         frac = GRID_Q[grid]
@@ -557,6 +573,19 @@ class TaskManager:
             element = unpitched(names[0]) if len(names) == 1 else percussion.PercussionChord([unpitched(n) for n in names])
             element.duration = m21dur.Duration(frac)
             part.insert(Fraction(slot) * frac, element)
+
+        # Sparse event insertion naturally ends the score at the final detected hit,
+        # which may be well before the source audio ends (outros and long rests are
+        # common). Insert a final grid-sized rest so MusicXML/OSMD retain the complete
+        # source timeline and the playback cursor cannot finish early.
+        if duration_seconds is not None and duration_seconds > 0:
+            step_seconds = float(frac) * 60.0 / float(tempo)
+            total_slots = max(1, int(math.ceil(float(duration_seconds) / step_seconds)))
+            final_slot = total_slots - 1
+            if final_slot not in by_offset:
+                tail = note.Rest()
+                tail.duration = m21dur.Duration(frac)
+                part.insert(Fraction(final_slot) * frac, tail)
         stream.Score([part]).write("musicxml", fp=str(path))
 
     @staticmethod
@@ -578,10 +607,31 @@ class TaskManager:
         allowed = {"audio": "input.wav", "musicxml": "score.musicxml", "events": "events.json", "midi": "performance.mid"}
         if name not in allowed:
             raise KeyError(name)
+        if name == "musicxml" and int(task.get("score_version") or 0) < SCORE_VERSION:
+            self._upgrade_musicxml(task_id)
         path = self.root / task_id / allowed[name]
         if not path.exists():
             raise FileNotFoundError(path)
         return path
+
+    def _upgrade_musicxml(self, task_id: str) -> None:
+        """Lazily extend pre-v2 scores to the full audio duration without GPU work."""
+        with self.lock:
+            task = self.tasks[task_id]
+            if int(task.get("score_version") or 0) >= SCORE_VERSION:
+                return
+            folder = self.root / task_id
+            payload = json.loads((folder / "events.json").read_text(encoding="utf-8"))
+            self._build_musicxml(
+                payload["events"],
+                float(payload["tempo"]),
+                payload.get("grid", task.get("options", {}).get("grid", "1/16")),
+                folder / "score.musicxml",
+                duration_seconds=float(payload.get("duration") or task.get("duration") or 0),
+            )
+            task["score_version"] = SCORE_VERSION
+            task["updated_at"] = _now()
+            self._write(task)
 
     @staticmethod
     def _video_dimensions(aspect_ratio: str, width: int, height: Optional[int]) -> tuple[int, int]:
@@ -669,8 +719,12 @@ class TaskManager:
             page.goto(f"http://127.0.0.1:{self.port}/tasks/{task_id}?recording=1", wait_until="networkidle")
             page.wait_for_function("window.__DRUMLAB_SCORE_READY__ === true", timeout=120000)
             page.click("#play")
-            duration_ms = int((float(self.tasks[task_id]["duration"] or 0) + 1.5) * 1000)
-            page.wait_for_timeout(duration_ms)
+            duration_ms = int((float(self.tasks[task_id]["duration"] or 0) + 30.0) * 1000)
+            page.wait_for_function(
+                "window.__DRUMLAB_SCORE_FINISHED__ === true",
+                timeout=max(30000, duration_ms),
+            )
+            page.wait_for_timeout(500)
             video = page.video
             context.close()
             source = Path(video.path())
