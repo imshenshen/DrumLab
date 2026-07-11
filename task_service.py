@@ -1499,6 +1499,11 @@ class TaskManager:
                     f"+({delta:.3f})*clip((t-{timestamp:.4f})/0.8,0,1)"
                 )
             previous_scroll, previous_time = target_scroll, timestamp
+        # Clamp the completed sum, not only each individual easing term. Crop
+        # clamps out-of-range y internally, but overlay does not; without this,
+        # any accumulated overshoot makes the cursor drift upward while the
+        # score has already stopped on the final screen.
+        scroll_expression = f"clip(({scroll_expression}),0,{max_scroll:.3f})"
         cursor_x_expression = step_expression(2)
         cursor_page_y_expression = step_expression(3)
         cursor_y_expression = f"({cursor_page_y_expression})-({scroll_expression})"
