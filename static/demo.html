@@ -54,7 +54,7 @@
   progress { width:110px; height:7px; accent-color:var(--blue); }
   .stage { display:block; margin-top:4px; color:var(--dim); font-size:11px; }
   .actions { display:flex; flex-wrap:wrap; gap:7px; min-width:250px; }
-  .record-controls { display:grid; grid-template-columns:76px 84px 92px auto; gap:6px; margin-top:7px; }
+  .record-controls { display:grid; grid-template-columns:70px 82px 88px 58px 76px auto; gap:6px; margin-top:7px; }
   .record-controls select,.record-controls input { height:32px; padding:4px 6px; }
   .recordings { display:grid; gap:5px; margin-top:8px; }
   .recording { display:flex; align-items:center; gap:7px; color:var(--dim); font-size:11px; }
@@ -152,7 +152,7 @@ function recordingRows(task) {
   for (const recording of values) {
     const row = el("div", "recording");
     row.append(el("span", `badge ${recording.status}`, recording.status));
-    row.append(document.createTextNode(`${recording.width}×${recording.height} · A4 ${recording.paper_size || "fit"}`));
+    row.append(document.createTextNode(`${recording.width}×${recording.height} · ${recording.fps || 30} FPS · ${recording.render_mode || "realtime"} · A4 ${recording.paper_size || "fit"}${recording.status === "running" ? ` · ${Math.round((recording.progress || 0) * 100)}%` : ""}`));
     if (recording.status === "completed") {
       const download = el("a", "", "下载 WebM"); download.href = recording.url; row.append(download);
     } else if (recording.error) row.append(el("span", "error-text", recording.error));
@@ -161,12 +161,12 @@ function recordingRows(task) {
   return wrap;
 }
 
-async function startRecording(taskId, ratio, width, paperSize, button) {
+async function startRecording(taskId, ratio, width, paperSize, fps, renderMode, button) {
   button.disabled = true;
   try {
     await api(`/api/tasks/${encodeURIComponent(taskId)}/recordings`, {
       method:"POST", headers:{"content-type":"application/json"},
-      body:JSON.stringify({service_port:Number($("service-port").value),aspect_ratio:ratio,width:Number(width),paper_size:paperSize}),
+      body:JSON.stringify({service_port:Number($("service-port").value),aspect_ratio:ratio,width:Number(width),paper_size:paperSize,fps:Number(fps),render_mode:renderMode}),
     });
     await loadTasks();
   } catch (error) { alert(error.message); }
@@ -242,9 +242,13 @@ function taskRow(task) {
   for (const [value,label] of [["fit","A4 适应"],["small","A4 小"],["medium","A4 中"],["large","A4 大"]]) {
     const option=el("option","",label); option.value=value; recordPaper.append(option);
   }
+  const recordFps = document.createElement("select"); recordFps.title="视频帧率";
+  for (const value of [24,30,60]) { const option=el("option","",`${value} FPS`); option.value=String(value); if(value===30) option.selected=true; recordFps.append(option); }
+  const renderMode = document.createElement("select"); renderMode.title="录制方式";
+  for (const [value,label] of [["offline","快速离线"],["realtime","实时兼容"]]) { const option=el("option","",label); option.value=value; renderMode.append(option); }
   const record = el("button", "", "无声录制"); record.disabled = !completed;
-  record.addEventListener("click", () => startRecording(task.id, ratio.value, width.value, recordPaper.value, record));
-  controls.append(ratio,width,recordPaper,record);
+  record.addEventListener("click", () => startRecording(task.id, ratio.value, width.value, recordPaper.value, recordFps.value, renderMode.value, record));
+  controls.append(ratio,width,recordPaper,recordFps,renderMode,record);
   actionsCell.append(controls, recordingRows(task));
   tr.append(identity,state,options,result,actionsCell);
   return tr;

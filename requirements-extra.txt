@@ -10,3 +10,4 @@ python-multipart
 music21
 mcp>=1.27,<2
 playwright
+Pillow

@@ -54,7 +54,7 @@ Everything installs into a single Python environment:
 - **FastAPI + Uvicorn + python-multipart + music21** — the web server and MusicXML export.
   These are pure-Python and don't touch torch.
 - **MCP Python SDK** — agent-facing Streamable HTTP tools.
-- **Playwright Chromium** — only needed by the optional silent score-recording API.
+- **Playwright Chromium and Pillow** — only needed by the optional silent score-recording API.
 
 ---
 
@@ -94,9 +94,9 @@ Everything installs into a single Python environment:
 
     If you cloned ADTOF-pytorch as a sibling folder instead, you can skip the second command.
    ```sh
-   pip install demucs fastapi uvicorn python-multipart music21 "mcp>=1.27,<2" playwright
+   pip install demucs fastapi uvicorn python-multipart music21 "mcp>=1.27,<2" playwright Pillow
    pip install --no-deps git+https://github.com/xavriley/ADTOF-pytorch.git
-   playwright install chromium     # only required for automatic video recording
+   python -m playwright install chromium  # run as the same user that starts DrumLab
    ```
 
    <sub>*`--no-deps` stops pip from reinstalling torch over the CUDA build from step 3.*</sub>
@@ -129,6 +129,7 @@ This starts the server on `127.0.0.1:8765` and opens it in your default browser.
 | `--port N` | listen on a different port (default `8765`) |
 | `--host ADDR` | bind address (default `127.0.0.1`; `0.0.0.0` to expose on your LAN) |
 | `--no-browser` | don't open a browser window |
+| `--recording-browser PATH` | use a system Chromium/Chrome executable for silent recording |
 | `--preload` | download all Demucs models, then exit |
 | `--library FOLDER` | index a folder for the song library / party shuffle (repeatable) |
 | `--task-root FOLDER` | restrict agent-supplied audio paths to this folder (repeatable) |
@@ -265,11 +266,17 @@ Create a silent recording after the task completes:
 ```sh
 curl -X POST http://127.0.0.1:8765/api/tasks/TASK_ID/recordings \
   -H 'content-type: application/json' \
-  -d '{"service_port":8765,"aspect_ratio":"9:16","width":1080,"paper_size":"fit"}'
+  -d '{"service_port":8765,"aspect_ratio":"9:16","width":1080,"paper_size":"fit","fps":30,"render_mode":"offline"}'
 ```
 
 Recording runs asynchronously and produces a WebM without audio. Poll the returned recording
 URL until `completed`, then download its `url` field.
+
+The default `render_mode` is `offline`: Chromium engraves and captures the score once, then
+Pillow and FFmpeg render the cursor and scrolling from the saved score timing without playing
+the audio. This is deterministic and can run faster than the song duration. Set
+`"render_mode":"realtime"` only as a compatibility fallback. Video `fps` defaults to 30 and
+accepts 12–60. Install the offline renderer with `uv pip install Pillow`.
 
 The video `aspect_ratio` and dimensions control only the WebM canvas. Score engraving always
 uses portrait A4 (`A4_P`) inside that canvas. `paper_size` controls only the displayed A4

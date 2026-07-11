@@ -79,10 +79,13 @@
 "use strict";
 window.__DRUMLAB_SCORE_READY__ = false;
 window.__DRUMLAB_SCORE_FINISHED__ = false;
+window.__DRUMLAB_RECORDING_STARTED__ = false;
 
 const taskId = decodeURIComponent(location.pathname.split("/").filter(Boolean).pop());
 const params = new URLSearchParams(location.search);
-const recordingMode = params.get("recording") === "1";
+const recordingKind = params.get("recording");
+const recordingMode = recordingKind === "1" || recordingKind === "offline";
+const offlineRecordingMode = recordingKind === "offline";
 if (recordingMode) document.body.classList.add("recording");
 const $ = id => document.getElementById(id);
 const audio = $("audio"), play = $("play"), stop = $("stop"), seek = $("seek");
@@ -191,6 +194,47 @@ function placeCursor(seconds, forceReset = false) {
     if (Math.abs(target - viewport.scrollTop) > view.height * 0.12) viewport.scrollTo({top:Math.max(0,target),behavior:"smooth"});
   }
 }
+
+// Export the engraved cursor positions once.  The offline recorder combines a
+// single clean score screenshot with this compact timeline, so it never has to
+// play the song or take one browser screenshot per video frame.
+window.__DRUMLAB_EXPORT_TIMELINE__ = () => {
+  if (!osmd || !meta) throw new Error("Score is not ready");
+  const wrap = $("sheet-wrap");
+  const sheetBox = wrap.getBoundingClientRect();
+  const points = [];
+  osmd.cursor.reset();
+  osmd.cursor.show();
+  let guard = 0;
+  while (guard++ < 50000) {
+    const seconds = cursorTimestamp();
+    const element = osmd.cursor.cursorElement || document.querySelector("[id^=cursorImg]");
+    if (element && Number.isFinite(seconds)) {
+      const box = element.getBoundingClientRect();
+      const point = {
+        t: seconds,
+        x: box.left - sheetBox.left,
+        y: box.top - sheetBox.top,
+        width: Math.max(3, box.width),
+        height: Math.max(10, box.height),
+      };
+      const previous = points[points.length - 1];
+      if (!previous || Math.abs(previous.t - point.t) > 0.0001 ||
+          Math.abs(previous.x - point.x) > 0.5 || Math.abs(previous.y - point.y) > 0.5) {
+        points.push(point);
+      }
+    }
+    if (!nextCursor()) break;
+  }
+  osmd.cursor.hide();
+  cursorLastTime = -1;
+  return {
+    points,
+    width: Math.ceil(wrap.scrollWidth),
+    height: Math.ceil(wrap.scrollHeight),
+    duration: Number(audio.duration || meta.duration || 0),
+  };
+};
 
 function update() {
   seek.value = String(audio.currentTime || 0);
@@ -325,6 +369,15 @@ audio.addEventListener("ended", () => {
     statusEl.textContent = `${scoreTempo.toFixed(3)} BPM · ${Object.values(meta.counts).reduce((a,b)=>a+b,0)} hits`;
     statusEl.classList.add("ready");
     placeCursor(scoreTimeFromAudio(0), true); update();
+    if (recordingMode && !offlineRecordingMode) {
+      // Recording mode hides the transport controls, so the server cannot click Play.
+      // Muted autoplay is allowed in headless Chromium and the captured WebM is silent.
+      audio.muted = true;
+      await audio.play();
+      play.textContent = "Pause";
+      cancelAnimationFrame(raf); update();
+      window.__DRUMLAB_RECORDING_STARTED__ = true;
+    }
     window.__DRUMLAB_SCORE_READY__ = true;
   } catch (error) {
     statusEl.textContent = "Error";

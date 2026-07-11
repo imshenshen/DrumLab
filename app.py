@@ -39,7 +39,7 @@ from fastapi.staticfiles import StaticFiles
 from mcp_integration import build_mcp_http_app
 from task_service import get_task_manager
 
-APP_VERSION = "8.3"
+APP_VERSION = "8.6"
 APP_DIR = Path(__file__).resolve().parent
 WORK = APP_DIR / "workdir"
 UPLOADS = WORK / "uploads"
@@ -805,6 +805,8 @@ def create_task_recording(task_id: str, params: dict):
             width=params.get("width", 1920),
             height=params.get("height"),
             paper_size=params.get("paper_size", "fit"),
+            fps=params.get("fps", 30),
+            render_mode=params.get("render_mode", "offline"),
         )
     except KeyError:
         raise HTTPException(404, "Task not found") from None
@@ -1592,6 +1594,9 @@ def main() -> None:
     ap.add_argument("--task-timeout", type=float, default=3600, metavar="SECONDS",
                     help="Maximum runtime for each queued score task (default: 3600; "
                          "0 disables the timeout).")
+    ap.add_argument("--recording-browser", default=None, metavar="PATH",
+                    help="Chromium/Chrome executable for silent score recording. If omitted, "
+                         "use a system browser or Playwright's installed Chromium.")
     args = ap.parse_args()
 
     if args.preload:
@@ -1601,7 +1606,8 @@ def main() -> None:
         args.port = _first_free_port(args.host, 8765)
 
     try:
-        TASKS.configure(args.port, args.task_root, args.task_output_root, args.task_timeout)
+        TASKS.configure(args.port, args.task_root, args.task_output_root, args.task_timeout,
+                        args.recording_browser)
     except (OSError, RuntimeError, ValueError) as exc:
         raise SystemExit(f"Invalid task path configuration: {exc}") from exc
 

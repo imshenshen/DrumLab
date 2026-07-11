@@ -74,6 +74,7 @@ class TaskManager:
         self.port: Optional[int] = None
         self.allowed_roots: list[Path] = []
         self.task_timeout_seconds = 3600.0
+        self.recording_browser_executable: Optional[str] = None
         self.cancel_requested: set[str] = set()
         self.active_processes: dict[str, subprocess.Popen] = {}
         self.deadlines: dict[str, Optional[float]] = {}
@@ -87,6 +88,7 @@ class TaskManager:
         allowed_roots: Optional[list[str]] = None,
         output_root: Optional[str] = None,
         task_timeout_seconds: float = 3600,
+        recording_browser: Optional[str] = None,
     ) -> None:
         self.port = int(port)
         try:
@@ -96,6 +98,17 @@ class TaskManager:
         if timeout < 0:
             raise ValueError("Task timeout cannot be negative; use 0 to disable it")
         self.task_timeout_seconds = timeout
+        configured_browser = recording_browser or os.environ.get("DRUMLAB_RECORDING_BROWSER")
+        if configured_browser:
+            browser_path = Path(configured_browser).expanduser().resolve(strict=True)
+            if not browser_path.is_file():
+                raise ValueError(f"Recording browser is not a file: {browser_path}")
+            self.recording_browser_executable = str(browser_path)
+        else:
+            self.recording_browser_executable = next((
+                path for name in ("chromium", "chromium-browser", "google-chrome", "google-chrome-stable")
+                if (path := shutil.which(name))
+            ), None)
         self.allowed_roots = []
         for value in allowed_roots or []:
             self.allowed_roots.append(Path(value).expanduser().resolve(strict=True))
@@ -1191,6 +1204,8 @@ class TaskManager:
         width: int = 1920,
         height: Optional[int] = None,
         paper_size: str = "fit",
+        fps: int = 30,
+        render_mode: str = "offline",
     ) -> dict[str, Any]:
         self._validate_port(service_port)
         task = self.get(task_id)
@@ -1198,6 +1213,12 @@ class TaskManager:
             raise ValueError("The score task must be completed before recording")
         if paper_size not in ("fit", "small", "medium", "large"):
             raise ValueError("paper_size must be fit, small, medium, or large")
+        fps = max(12, min(60, int(fps)))
+        if render_mode not in ("offline", "realtime"):
+            raise ValueError("render_mode must be offline or realtime")
+        self._validate_recording_browser()
+        if render_mode == "offline":
+            self._validate_offline_renderer()
         width, height = self._video_dimensions(aspect_ratio, width, height)
         recording_id = uuid.uuid4().hex
         recording = {
@@ -1207,6 +1228,9 @@ class TaskManager:
             "height": height,
             "paper_format": "A4_P",
             "paper_size": paper_size,
+            "fps": fps,
+            "render_mode": render_mode,
+            "progress": 0.0,
             "created_at": _now(),
             "updated_at": _now(),
             "error": None,
@@ -1217,6 +1241,48 @@ class TaskManager:
             self._write(self.tasks[task_id])
         self.record_pending.put((task_id, recording_id))
         return recording
+
+    def _recording_launch_kwargs(self, playwright) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {
+            "headless": True,
+            "args": ["--no-sandbox", "--autoplay-policy=no-user-gesture-required"],
+        }
+        if self.recording_browser_executable:
+            kwargs["executable_path"] = self.recording_browser_executable
+        return kwargs
+
+    def _validate_recording_browser(self) -> None:
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            raise ValueError(
+                f"Playwright is not installed. Run: {self.python} -m pip install playwright"
+            ) from None
+        try:
+            with sync_playwright() as playwright:
+                executable = self.recording_browser_executable or playwright.chromium.executable_path
+                if not executable or not Path(executable).is_file():
+                    raise ValueError(
+                        "Recording Chromium is not installed for the DrumLab service user. "
+                        f"Run as that same user: {self.python} -m playwright install chromium. "
+                        "Alternatively start DrumLab with --recording-browser /path/to/chromium."
+                    )
+                browser = playwright.chromium.launch(**self._recording_launch_kwargs(playwright))
+                browser.close()
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise ValueError(
+                "Recording browser could not start. Install Chromium and its Linux dependencies "
+                f"with: {self.python} -m playwright install --with-deps chromium. Details: {exc}"
+            ) from None
+
+    @staticmethod
+    def _validate_offline_renderer() -> None:
+        if importlib.util.find_spec("PIL") is None:
+            raise ValueError("Offline recording requires Pillow. Run: pip install Pillow")
+        if not shutil.which("ffmpeg"):
+            raise ValueError("Offline recording requires FFmpeg on PATH")
 
     def get_recording(self, task_id: str, recording_id: str) -> dict[str, Any]:
         with self.lock:
@@ -1243,6 +1309,111 @@ class TaskManager:
                 self.record_pending.task_done()
 
     def _record(self, task_id: str, recording_id: str) -> None:
+        recording = self.get_recording(task_id, recording_id)
+        # Recordings created before v8.6 have no render_mode and used Playwright's
+        # real-time video capture, so preserve that behavior when resuming them.
+        if recording.get("render_mode", "realtime") == "realtime":
+            self._record_realtime(task_id, recording_id)
+        else:
+            self._record_offline(task_id, recording_id)
+
+    def _record_offline(self, task_id: str, recording_id: str) -> None:
+        from PIL import Image, ImageDraw
+        from playwright.sync_api import sync_playwright
+
+        recording = self.get_recording(task_id, recording_id)
+        folder = self.root / task_id / "recordings" / recording_id
+        folder.mkdir(parents=True, exist_ok=True)
+        self._record_update(task_id, recording_id, status="running")
+        score_png = folder / "score.png"
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(**self._recording_launch_kwargs(playwright))
+            context = browser.new_context(
+                viewport={"width": recording["width"], "height": recording["height"]},
+            )
+            page = context.new_page()
+            page.goto(
+                f"http://127.0.0.1:{self.port}/tasks/{task_id}"
+                f"?recording=offline&paper_size={recording.get('paper_size', 'fit')}",
+                wait_until="networkidle",
+            )
+            page.wait_for_function("window.__DRUMLAB_SCORE_READY__ === true", timeout=120000)
+            timeline = page.evaluate("window.__DRUMLAB_EXPORT_TIMELINE__()")
+            page.locator("#sheet-wrap").screenshot(path=str(score_png))
+            context.close()
+            browser.close()
+
+        points = timeline.get("points") or []
+        if not points:
+            raise RuntimeError("The score did not expose any cursor positions")
+        score = Image.open(score_png).convert("RGB")
+        width, height = int(recording["width"]), int(recording["height"])
+        fps = int(recording.get("fps", 30))
+        duration = max(0.1, float(timeline.get("duration") or self.tasks[task_id].get("duration") or 0))
+        frame_count = max(1, math.ceil(duration * fps))
+        final = folder / "dynamic-score.webm"
+        command = [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{width}x{height}",
+            "-r", str(fps), "-i", "-", "-an", "-c:v", "libvpx-vp9",
+            "-deadline", "realtime", "-cpu-used", "8", "-b:v", "0", "-crf", "32",
+            "-pix_fmt", "yuv420p", str(final),
+        ]
+        process = subprocess.Popen(command, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+        times = [float(point["t"]) for point in points]
+        scroll_y = 0.0
+        sheet_x = max(0, (width - score.width) // 2)
+        sheet_top = 12
+        try:
+            assert process.stdin is not None
+            for frame_index in range(frame_count):
+                seconds = frame_index / fps
+                point = points[max(0, bisect.bisect_right(times, seconds) - 1)]
+                target_scroll = max(0.0, min(
+                    max(0, score.height - height + sheet_top * 2),
+                    float(point["y"]) - height * 0.30,
+                ))
+                scroll_y += (target_scroll - scroll_y) * min(1.0, 8.0 / fps)
+                scroll = int(round(scroll_y))
+                frame = Image.new("RGB", (width, height), (217, 220, 226))
+                source_top = max(0, scroll - sheet_top)
+                destination_top = max(0, sheet_top - scroll)
+                visible_height = min(score.height - source_top, height - destination_top)
+                if visible_height > 0:
+                    crop = score.crop((0, source_top, score.width, source_top + visible_height))
+                    frame.paste(crop, (sheet_x, destination_top))
+                draw = ImageDraw.Draw(frame)
+                cursor_x = round(sheet_x + float(point["x"]))
+                cursor_y = round(sheet_top + float(point["y"]) - scroll)
+                cursor_w = max(4, round(float(point.get("width", 4))))
+                cursor_h = max(12, round(float(point.get("height", 20))))
+                draw.rectangle((cursor_x, cursor_y, cursor_x + cursor_w, cursor_y + cursor_h), fill=(66, 214, 111))
+                process.stdin.write(frame.tobytes())
+                if frame_index % max(fps, 30) == 0:
+                    self._record_update(
+                        task_id, recording_id,
+                        progress=round(frame_index / frame_count, 4),
+                        rendered_seconds=round(seconds, 2),
+                    )
+            process.stdin.close()
+            stderr = process.stderr.read().decode("utf-8", "replace") if process.stderr else ""
+            return_code = process.wait()
+            if return_code:
+                raise RuntimeError(f"FFmpeg offline recording failed: {stderr.strip()}")
+        except (BrokenPipeError, OSError):
+            process.kill()
+            stderr = process.stderr.read().decode("utf-8", "replace") if process.stderr else ""
+            raise RuntimeError(f"FFmpeg offline recording stopped: {stderr.strip()}") from None
+        finally:
+            if process.poll() is None:
+                process.kill()
+        score_png.unlink(missing_ok=True)
+        self._record_update(
+            task_id, recording_id, status="completed", path=str(final), progress=1.0,
+            rendered_seconds=round(duration, 2),
+        )
+
+    def _record_realtime(self, task_id: str, recording_id: str) -> None:
         from playwright.sync_api import sync_playwright
 
         recording = self.get_recording(task_id, recording_id)
@@ -1250,7 +1421,7 @@ class TaskManager:
         folder.mkdir(parents=True, exist_ok=True)
         self._record_update(task_id, recording_id, status="running")
         with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(headless=True, args=["--no-sandbox"])
+            browser = playwright.chromium.launch(**self._recording_launch_kwargs(playwright))
             context = browser.new_context(
                 viewport={"width": recording["width"], "height": recording["height"]},
                 record_video_dir=str(folder),
@@ -1263,12 +1434,9 @@ class TaskManager:
                 wait_until="networkidle",
             )
             page.wait_for_function("window.__DRUMLAB_SCORE_READY__ === true", timeout=120000)
-            page.click("#play")
+            page.wait_for_function("window.__DRUMLAB_RECORDING_STARTED__ === true", timeout=30000)
             duration_ms = int((float(self.tasks[task_id]["duration"] or 0) + 30.0) * 1000)
-            page.wait_for_function(
-                "window.__DRUMLAB_SCORE_FINISHED__ === true",
-                timeout=max(30000, duration_ms),
-            )
+            page.wait_for_function("window.__DRUMLAB_SCORE_FINISHED__ === true", timeout=max(30000, duration_ms))
             page.wait_for_timeout(500)
             video = page.video
             context.close()
@@ -1276,7 +1444,7 @@ class TaskManager:
             final = folder / "dynamic-score.webm"
             shutil.move(str(source), final)
             browser.close()
-        self._record_update(task_id, recording_id, status="completed", path=str(final))
+        self._record_update(task_id, recording_id, status="completed", path=str(final), progress=1.0)
 
     def recording_file(self, task_id: str, recording_id: str) -> Path:
         recording = self.get_recording(task_id, recording_id)
