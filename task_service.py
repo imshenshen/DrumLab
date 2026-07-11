@@ -1330,6 +1330,9 @@ class TaskManager:
             browser = playwright.chromium.launch(**self._recording_launch_kwargs(playwright))
             context = browser.new_context(
                 viewport={"width": recording["width"], "height": recording["height"]},
+                # Engrave at 2x physical resolution, then downsample with Lanczos.
+                # This keeps staff lines and note heads crisp after VP9 encoding.
+                device_scale_factor=2,
             )
             page = context.new_page()
             page.goto(
@@ -1347,6 +1350,13 @@ class TaskManager:
         if not points:
             raise RuntimeError("The score did not expose any cursor positions")
         score = Image.open(score_png).convert("RGB")
+        css_score_size = (
+            max(1, int(round(float(timeline.get("width") or score.width)))),
+            max(1, int(round(float(timeline.get("height") or score.height)))),
+        )
+        if score.size != css_score_size:
+            resampling = getattr(Image, "Resampling", Image)
+            score = score.resize(css_score_size, resampling.LANCZOS)
         width, height = int(recording["width"]), int(recording["height"])
         fps = int(recording.get("fps", 30))
         duration = max(0.1, float(timeline.get("duration") or self.tasks[task_id].get("duration") or 0))
@@ -1356,7 +1366,8 @@ class TaskManager:
             "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
             "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{width}x{height}",
             "-r", str(fps), "-i", "-", "-an", "-c:v", "libvpx-vp9",
-            "-deadline", "realtime", "-cpu-used", "8", "-b:v", "0", "-crf", "32",
+            "-deadline", "realtime", "-cpu-used", "6", "-row-mt", "1",
+            "-b:v", "0", "-crf", "18",
             "-pix_fmt", "yuv420p", str(final),
         ]
         process = subprocess.Popen(command, stdin=subprocess.PIPE, stderr=subprocess.PIPE)

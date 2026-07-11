@@ -276,7 +276,8 @@ The default `render_mode` is `offline`: Chromium engraves and captures the score
 Pillow and FFmpeg render the cursor and scrolling from the saved score timing without playing
 the audio. This is deterministic and can run faster than the song duration. Set
 `"render_mode":"realtime"` only as a compatibility fallback. Video `fps` defaults to 30 and
-accepts 12–60. Install the offline renderer with `uv pip install Pillow`.
+accepts 12–60. Offline score engraving uses 2x supersampling and high-quality VP9 encoding so
+thin staff lines remain sharp. Install the offline renderer with `uv pip install Pillow`.
 
 The video `aspect_ratio` and dimensions control only the WebM canvas. Score engraving always
 uses portrait A4 (`A4_P`) inside that canvas. `paper_size` controls only the displayed A4

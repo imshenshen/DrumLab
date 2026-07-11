@@ -39,7 +39,7 @@ from fastapi.staticfiles import StaticFiles
 from mcp_integration import build_mcp_http_app
 from task_service import get_task_manager
 
-APP_VERSION = "8.6"
+APP_VERSION = "8.7"
 APP_DIR = Path(__file__).resolve().parent
 WORK = APP_DIR / "workdir"
 UPLOADS = WORK / "uploads"
