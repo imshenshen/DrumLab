@@ -39,7 +39,7 @@ from fastapi.staticfiles import StaticFiles
 from mcp_integration import build_mcp_http_app
 from task_service import get_task_manager
 
-APP_VERSION = "8.1"
+APP_VERSION = "8.3"
 APP_DIR = Path(__file__).resolve().parent
 WORK = APP_DIR / "workdir"
 UPLOADS = WORK / "uploads"
@@ -54,7 +54,7 @@ TASKS = get_task_manager(APP_DIR, sys.executable)
 
 PYEXE = sys.executable
 WORKER = APP_DIR / "adtof_worker.py"
-TEMPO_VERSION = 2  # keep in sync with adtof_worker.TEMPO_VERSION; older caches get a tempo-only refresh
+TEMPO_VERSION = 3  # keep in sync with adtof_worker.TEMPO_VERSION; v3 stores beat_times
 
 # Model output channel order (ADTOF LABELS_5 = [35, 38, 47, 42, 49]).
 # NOTE: channel 2 is TOM and channel 3 is HI-HAT -- the package defaults
@@ -713,6 +713,8 @@ def create_task(params: dict):
             pickup_mode=params.get("pickup_mode", "auto"),
             pickup_beats=params.get("pickup_beats", 0),
             notation_offset_seconds=params.get("notation_offset_seconds"),
+            notation_tempo=params.get("notation_tempo"),
+            timing_mode=params.get("timing_mode", "beat_map"),
             fps=params.get("fps", 100),
             thresholds=params.get("thresholds"),
         )

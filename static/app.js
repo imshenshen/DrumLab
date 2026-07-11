@@ -2658,6 +2658,9 @@ function renderWorkspaceTask(task) {
   $("workspace-pickup-mode").value = options.pickup_mode || "auto";
   $("workspace-pickup-beats").value = String(options.pickup_beats || 0);
   $("workspace-offset").value = String(options.notation_offset_seconds || 0);
+  $("workspace-notation-tempo").value = String(options.notation_tempo || task.tempo || 120);
+  $("workspace-timing-mode").value = options.timing_mode || "beat_map";
+  $("workspace-notation-tempo").disabled = $("workspace-timing-mode").value === "beat_map";
   $("workspace-bars").value = String(options.measures_per_system || 3);
   $("out-grid").value = options.grid || "1/16";
 }
@@ -2701,6 +2704,8 @@ $("workspace-notation-save").addEventListener("click", async () => {
         pickup_mode:$("workspace-pickup-mode").value,
         pickup_beats:Number($("workspace-pickup-beats").value),
         notation_offset_seconds:Number($("workspace-offset").value),
+        notation_tempo:Number($("workspace-notation-tempo").value),
+        timing_mode:$("workspace-timing-mode").value,
         measures_per_system:Number($("workspace-bars").value),
       }),
     });
@@ -2709,6 +2714,9 @@ $("workspace-notation-save").addEventListener("click", async () => {
   } catch (error) {
     $("workspace-notation-status").textContent = error.message;
   } finally { button.disabled = false; }
+});
+$("workspace-timing-mode").addEventListener("change", event => {
+  $("workspace-notation-tempo").disabled = event.target.value === "beat_map";
 });
 
 function setLog(msg, isErr) {

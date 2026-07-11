@@ -38,6 +38,8 @@ def build_mcp_http_app(task_manager) -> tuple[Any, Any]:
         pickup_mode: str = "auto",
         pickup_beats: float = 0.0,
         notation_offset_seconds: Optional[float] = None,
+        notation_tempo: Optional[float] = None,
+        timing_mode: str = "beat_map",
         fps: int = 100,
         thresholds: Optional[dict[str, float]] = None,
     ) -> dict[str, Any]:
@@ -55,6 +57,8 @@ def build_mcp_http_app(task_manager) -> tuple[Any, Any]:
             pickup_mode=pickup_mode,
             pickup_beats=pickup_beats,
             notation_offset_seconds=notation_offset_seconds,
+            notation_tempo=notation_tempo,
+            timing_mode=timing_mode,
             fps=fps,
             thresholds=thresholds,
         )
@@ -77,6 +81,8 @@ def build_mcp_http_app(task_manager) -> tuple[Any, Any]:
         pickup_beats: float = 0.0,
         measures_per_system: int = 3,
         notation_offset_seconds: Optional[float] = None,
+        notation_tempo: Optional[float] = None,
+        timing_mode: str = "beat_map",
         grid: str = "1/16",
         beats_per_measure: int = 4,
         beat_unit: int = 4,
@@ -91,6 +97,8 @@ def build_mcp_http_app(task_manager) -> tuple[Any, Any]:
             "beats_per_measure": beats_per_measure,
             "beat_unit": beat_unit,
             **({"notation_offset_seconds": notation_offset_seconds} if notation_offset_seconds is not None else {}),
+            **({"notation_tempo": notation_tempo} if notation_tempo is not None else {}),
+            "timing_mode": timing_mode,
         })
 
     @server.tool()

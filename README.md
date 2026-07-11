@@ -212,6 +212,17 @@ that first onset is placed at score time 0 (the first beat unless a pickup is co
 The dynamic page can adjust and save this offset; cursor timing subtracts the same value from
 audio time so playback stays synchronized.
 
+`notation_tempo` is the score-grid BPM and defaults to the detected tempo. It can be tuned
+independently when a tiny global tempo error accumulates over a long song and pushes a late
+sixteenth note across a barline. Quantization is performed on `(event_time - lead_in)` before
+rounding, so changing the lead-in no longer introduces a second rounding error.
+
+`timing_mode` defaults to `beat_map`. DrumLab persists Librosa's full `beat_times`, anchors
+the map to the score lead-in, and quantizes each event inside its local beat interval. This
+prevents global-BPM drift across long recordings. `fixed` keeps the manually tunable global
+score BPM as a fallback. Dynamic-score cursor timing interpolates the same beat map back to
+absolute audio time.
+
 Pickup handling uses `pickup_mode`: `none`, `manual`, or `auto` (default). Manual mode uses
 `pickup_beats`; auto mode scores kick, snare, and cymbal bar phases and stores both the
 detected pickup length and confidence. On a completed task, the dynamic-score page can edit

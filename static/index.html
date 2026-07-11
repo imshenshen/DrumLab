@@ -267,6 +267,8 @@
       </label>
       <label>Beats <input type="number" id="workspace-pickup-beats" min="0" step="0.25" value="0"></label>
       <label>Lead-in <input type="number" id="workspace-offset" min="0" step="0.01" value="0"> s</label>
+      <label>Score BPM <input type="number" id="workspace-notation-tempo" min="20" max="999" step="0.001" value="120"></label>
+      <label>Timing <select id="workspace-timing-mode"><option value="beat_map">Beat map</option><option value="fixed">Fixed BPM</option></select></label>
       <label>Bars/line <input type="number" id="workspace-bars" min="1" max="6" value="3"></label>
       <button class="ghost-btn" id="workspace-notation-save" type="button">Save score settings</button>
       <span class="hint" id="workspace-notation-status"></span>

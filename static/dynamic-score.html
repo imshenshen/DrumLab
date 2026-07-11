@@ -60,6 +60,8 @@
 </div>
 <div id="notation-controls">
   <label>拍号 <input id="notation-beats" type="number" min="1" max="32" value="4"> / <select id="notation-beat-unit"><option>1</option><option>2</option><option selected>4</option><option>8</option><option>16</option><option>32</option></select></label>
+  <label>谱面 BPM <input id="notation-tempo" type="number" min="20" max="999" step="0.001" value="120"></label>
+  <label>计时 <select id="timing-mode"><option value="beat_map">逐拍映射</option><option value="fixed">固定 BPM</option></select></label>
   <label>网格 <select id="notation-grid"><option>1/8</option><option selected>1/16</option><option>1/16T</option><option>1/32</option></select></label>
   <label>弱起 <select id="pickup-mode"><option value="auto">自动检测</option><option value="none">无弱起</option><option value="manual">手动</option></select></label>
   <label>拍数 <input id="pickup-beats" type="number" min="0" step="0.25" value="0"></label>
@@ -128,12 +130,22 @@ function cursorTimestamp() {
     // OSMD timestamps are fractions of a whole note (a 4/4 measure is 1.0),
     // while BPM is quarter-notes per minute. The previous conversion omitted
     // this factor of four, making the score cursor run roughly 4x too fast.
-    return Number(wholeNotes) * 4 * 60 / Number(meta.tempo);
+    const quarterPosition = Number(wholeNotes) * 4;
+    const beatUnit = Number(meta.beat_unit || 4);
+    const beatPosition = quarterPosition / (4 / beatUnit);
+    const beatMap = meta.timing_mode === "beat_map" ? meta.score_beat_times : null;
+    if (Array.isArray(beatMap) && beatMap.length >= 2) {
+      const index = Math.max(0, Math.min(beatMap.length - 2, Math.floor(beatPosition)));
+      const fraction = Math.max(0, Math.min(1, beatPosition - index));
+      return Number(beatMap[index]) + fraction * (Number(beatMap[index + 1]) - Number(beatMap[index]));
+    }
+    return Number(meta.notation_offset_seconds || 0)
+      + quarterPosition * 60 / Number(meta.notation_tempo || meta.tempo);
   } catch (_) { return Infinity; }
 }
 
 function scoreTimeFromAudio(seconds) {
-  return Math.max(0, Number(seconds || 0) - Number(meta?.notation_offset_seconds || 0));
+  return Math.max(0, Number(seconds || 0));
 }
 
 function nextCursor() {
@@ -231,8 +243,10 @@ async function applyPaperSize() {
 $("paper-size").querySelector("select").addEventListener("change", applyPaperSize);
 function syncPickupInput() {
   $("pickup-beats").disabled = $("pickup-mode").value !== "manual";
+  $("notation-tempo").disabled = $("timing-mode").value === "beat_map";
 }
 $("pickup-mode").addEventListener("change", syncPickupInput);
+$("timing-mode").addEventListener("change", syncPickupInput);
 $("notation-save").addEventListener("click", async () => {
   const button = $("notation-save"), noteStatus = $("notation-status");
   button.disabled = true; noteStatus.textContent = "正在重新生成 MusicXML…";
@@ -245,6 +259,8 @@ $("notation-save").addEventListener("click", async () => {
         grid:$("notation-grid").value,
         beats_per_measure:Number($("notation-beats").value),
         beat_unit:Number($("notation-beat-unit").value),
+        notation_tempo:Number($("notation-tempo").value),
+        timing_mode:$("timing-mode").value,
         notation_offset_seconds:Number($("notation-offset").value),
         measures_per_system:Number($("measures-per-system").value),
       }),
@@ -269,6 +285,8 @@ audio.addEventListener("ended", () => {
     $("notation-grid").value = options.grid || "1/16";
     $("notation-beats").value = String(options.beats_per_measure || 4);
     $("notation-beat-unit").value = String(options.beat_unit || 4);
+    $("notation-tempo").value = String(options.notation_tempo || task.tempo || 120);
+    $("timing-mode").value = options.timing_mode || "beat_map";
     $("pickup-beats").value = String(options.pickup_beats || 0);
     $("notation-offset").value = String(options.notation_offset_seconds || 0);
     $("pickup-beats").max = String(Math.max(0, Number(options.beats_per_measure || 4) - 0.01));
@@ -303,7 +321,8 @@ audio.addEventListener("ended", () => {
     seek.max = String(audio.duration || meta.duration || 1);
     play.disabled = stop.disabled = seek.disabled = false;
     message.classList.add("hidden");
-    statusEl.textContent = `${meta.tempo.toFixed(1)} BPM · ${Object.values(meta.counts).reduce((a,b)=>a+b,0)} hits`;
+    const scoreTempo = Number(meta.notation_tempo || meta.tempo);
+    statusEl.textContent = `${scoreTempo.toFixed(3)} BPM · ${Object.values(meta.counts).reduce((a,b)=>a+b,0)} hits`;
     statusEl.classList.add("ready");
     placeCursor(scoreTimeFromAudio(0), true); update();
     window.__DRUMLAB_SCORE_READY__ = true;

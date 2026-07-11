@@ -19,15 +19,15 @@ from pathlib import Path
 import numpy as np
 
 
-TEMPO_VERSION = 2  # bump when the detector changes; app.py refreshes caches with an older tempo_v
+TEMPO_VERSION = 3  # v3 persists the full beat-time map, not only a global BPM
 
 
 def log(msg: str) -> None:
     print(msg, flush=True)
 
 
-def detect_tempo(audio_path: Path) -> tuple[float, float]:
-    """Return (tempo_bpm, duration_sec) for the audio.
+def detect_tempo(audio_path: Path) -> tuple[float, float, list[float]]:
+    """Return (tempo_bpm, duration_sec, beat_times_sec) for the audio.
 
     beat_track's global BPM is quantized to the tempogram lag grid (hop 512 @
     22050 Hz), which lands 1-3 BPM off the true tempo -- audible as a metronome
@@ -46,7 +46,7 @@ def detect_tempo(audio_path: Path) -> tuple[float, float]:
         good = intervals[np.abs(intervals - median) < 0.15 * median]
         if len(good) >= 8:
             tempo = 60.0 / float(np.mean(good))
-    return tempo, float(len(y)) / sr
+    return tempo, float(len(y)) / sr, [round(float(value), 6) for value in beats]
 
 
 def main() -> None:
@@ -68,8 +68,9 @@ def main() -> None:
         meta_path = out_dir / "meta.json"
         meta = json.loads(meta_path.read_text())
         log("[worker] refreshing tempo (librosa beat-track, refined) ...")
-        tempo, duration = detect_tempo(audio_path)
-        meta.update({"tempo": tempo, "duration": duration, "tempo_v": TEMPO_VERSION})
+        tempo, duration, beat_times = detect_tempo(audio_path)
+        meta.update({"tempo": tempo, "duration": duration, "beat_times": beat_times,
+                     "tempo_v": TEMPO_VERSION})
         meta_path.write_text(json.dumps(meta, indent=2))
         log(f"[worker] done. tempo={tempo:.2f} bpm")
         return
@@ -110,13 +111,14 @@ def main() -> None:
     log(f"[worker] activations cached: {pred.shape[0]} frames x {pred.shape[1]} classes")
 
     log("[worker] detecting tempo (librosa beat-track, refined) ...")
-    tempo, duration = detect_tempo(audio_path)
+    tempo, duration, beat_times = detect_tempo(audio_path)
 
     meta = {
         "fps": int(args.fps),
         "tempo": tempo,
         "tempo_v": TEMPO_VERSION,
         "duration": duration,
+        "beat_times": beat_times,
         "n_frames": int(pred.shape[0]),
         "audio": str(audio_path),
         "device": device,
