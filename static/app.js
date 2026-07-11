@@ -2487,11 +2487,18 @@ $("dl-selected").addEventListener("click", () => {
   if (!selectedStems().length) return;
   window.location.href = dlStemsURL();
 });
-$("dl-midi").addEventListener("click", () => { window.location.href = dlURL("midi"); });
-$("dl-midi-quant").addEventListener("click", () => { window.location.href = dlURL("midi_quant"); });
-$("dl-musicxml").addEventListener("click", () => { window.location.href = dlURL("musicxml"); });
+$("dl-midi").addEventListener("click", () => {
+  window.location.href = workspaceTaskId ? `/api/tasks/${encodeURIComponent(workspaceTaskId)}/midi` : dlURL("midi");
+});
+$("dl-midi-quant").addEventListener("click", () => {
+  window.location.href = workspaceTaskId ? `/api/tasks/${encodeURIComponent(workspaceTaskId)}/midi` : dlURL("midi_quant");
+});
+$("dl-musicxml").addEventListener("click", () => {
+  window.location.href = workspaceTaskId ? `/api/tasks/${encodeURIComponent(workspaceTaskId)}/musicxml` : dlURL("musicxml");
+});
 $("dl-view-score").addEventListener("click", () => {
-  window.open("/static/score.html?grid=" + encodeURIComponent($("out-grid").value), "_blank");
+  if (workspaceTaskId) window.open(`/tasks/${encodeURIComponent(workspaceTaskId)}`, "_blank");
+  else window.open("/static/score.html?grid=" + encodeURIComponent($("out-grid").value), "_blank");
 });
 
 $("out-bpm").addEventListener("change", async () => {
@@ -2632,6 +2639,77 @@ let lastStemKey = null;
 let lastPickRev = 0;
 let lastState = null;
 let pollTimer = null;
+let workspaceTaskId = null;
+let workspaceTask = null;
+
+function renderWorkspaceTask(task) {
+  workspaceTask = task;
+  workspaceTaskId = task ? task.id : null;
+  $("workspace-notation").classList.toggle("hidden", !task);
+  $("workspace-task-score").classList.toggle("hidden", !task);
+  $("workspace-task-status").textContent = task ? `${task.source_name} · ${task.status}` : "";
+  document.querySelectorAll("#sliders input").forEach(input => { input.disabled = !!task; });
+  $("ad-live").disabled = !!task;
+  if (!task) return;
+  const options = task.options || {};
+  $("workspace-task-id").value = task.id;
+  $("workspace-beats").value = String(options.beats_per_measure || 4);
+  $("workspace-beat-unit").value = String(options.beat_unit || 4);
+  $("workspace-pickup-mode").value = options.pickup_mode || "auto";
+  $("workspace-pickup-beats").value = String(options.pickup_beats || 0);
+  $("workspace-offset").value = String(options.notation_offset_seconds || 0);
+  $("workspace-bars").value = String(options.measures_per_system || 3);
+  $("out-grid").value = options.grid || "1/16";
+}
+
+async function openWorkspaceTask(taskId) {
+  taskId = String(taskId || "").trim();
+  if (!taskId) throw new Error("Enter a task ID");
+  $("workspace-task-open").disabled = true;
+  $("workspace-task-status").textContent = "Opening task…";
+  try {
+    const result = await postJSON(`/api/workspace/tasks/${encodeURIComponent(taskId)}`, {});
+    renderWorkspaceTask(result.task);
+    setLog(`Opened task ${taskId} in the main workspace`);
+    poll(true);
+  } finally {
+    $("workspace-task-open").disabled = false;
+  }
+}
+
+$("workspace-task-open").addEventListener("click", () => {
+  openWorkspaceTask($("workspace-task-id").value).catch(error => {
+    $("workspace-task-status").textContent = error.message;
+    setLog("Open task: " + error.message, true);
+  });
+});
+$("workspace-task-score").addEventListener("click", () => {
+  if (workspaceTaskId) window.open(`/tasks/${encodeURIComponent(workspaceTaskId)}`, "_blank");
+});
+$("workspace-notation-save").addEventListener("click", async () => {
+  if (!workspaceTaskId) return;
+  const button = $("workspace-notation-save");
+  button.disabled = true;
+  $("workspace-notation-status").textContent = "Saving…";
+  try {
+    const task = await api(`/api/tasks/${encodeURIComponent(workspaceTaskId)}/notation`, {
+      method:"PATCH", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({
+        grid:$("out-grid").value,
+        beats_per_measure:Number($("workspace-beats").value),
+        beat_unit:Number($("workspace-beat-unit").value),
+        pickup_mode:$("workspace-pickup-mode").value,
+        pickup_beats:Number($("workspace-pickup-beats").value),
+        notation_offset_seconds:Number($("workspace-offset").value),
+        measures_per_system:Number($("workspace-bars").value),
+      }),
+    });
+    renderWorkspaceTask(task);
+    $("workspace-notation-status").textContent = "Saved to task";
+  } catch (error) {
+    $("workspace-notation-status").textContent = error.message;
+  } finally { button.disabled = false; }
+});
 
 function setLog(msg, isErr) {
   const el = $("log-line");
@@ -2649,7 +2727,10 @@ function renderJob(prefix, job) {
   bar.style.opacity = job.progress != null || job.status !== "running" ? "1" : "0.35";
   $(prefix + "-run").disabled = job.status === "running";
   $(prefix + "-stop").disabled = job.status !== "running";
-  if (prefix === "ad") $("ad-run-stem").disabled = job.status === "running";
+  if (prefix === "ad") {
+    $(prefix + "-run").disabled = job.status === "running" || !!workspaceTaskId;
+    $("ad-run-stem").disabled = job.status === "running" || !!workspaceTaskId;
+  }
 }
 
 async function poll(fast) {
@@ -2658,6 +2739,13 @@ async function poll(fast) {
   try {
     const s = await api("/api/state");
     lastState = s;
+    if (s.workspace_task_id !== workspaceTaskId) {
+      if (s.workspace_task_id) {
+        api(`/api/tasks/${encodeURIComponent(s.workspace_task_id)}`)
+          .then(renderWorkspaceTask)
+          .catch(error => setLog("Task state: " + error.message, true));
+      } else renderWorkspaceTask(null);
+    }
     if (s.version) $("app-ver").textContent = "DrumLab " + s.version;
     renderJob("dm", s.jobs.demucs);
     renderJob("ad", s.jobs.adtof);
@@ -2795,3 +2883,5 @@ poll(true);
 loadLibrary();       // index any --library roots; enables party shuffle if configured
 requestAnimationFrame(raf);
 setLog("DrumLab ready — drop a file to begin");
+const initialTaskId = new URLSearchParams(location.search).get("task_id");
+if (initialTaskId) openWorkspaceTask(initialTaskId).catch(error => setLog("Open task: " + error.message, true));

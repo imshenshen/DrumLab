@@ -39,7 +39,7 @@ from fastapi.staticfiles import StaticFiles
 from mcp_integration import build_mcp_http_app
 from task_service import get_task_manager
 
-APP_VERSION = "8.0"
+APP_VERSION = "8.1"
 APP_DIR = Path(__file__).resolve().parent
 WORK = APP_DIR / "workdir"
 UPLOADS = WORK / "uploads"
@@ -225,6 +225,7 @@ STATE = {
     "acts": None,   # {"key", "dir", "fps", "tempo", "duration"}
     "pick": None,   # {"rev", "thresholds", "fps", "events", "counts"}
     "tempo_override": None,  # manual BPM; None = use the detected tempo
+    "workspace_task_id": None,  # completed durable task opened in the main UI
 }
 PICK_REV = [0]
 ACTS_RAM: "OrderedDict[str, np.ndarray]" = OrderedDict()  # small LRU of activation arrays
@@ -649,6 +650,52 @@ def task_demo_page():
     return Response(content=html.replace("__VER__", APP_VERSION), media_type="text/html")
 
 
+@app.post("/api/workspace/tasks/{task_id}")
+def open_task_in_workspace(task_id: str):
+    """Open a completed durable task in the main editing workspace."""
+    try:
+        task = TASKS.get(task_id)
+        if task["status"] != "completed":
+            raise HTTPException(409, "Task must be completed before it can be opened")
+        audio_path = TASKS.artifact(task_id, "audio")
+        events_path = TASKS.artifact(task_id, "events")
+    except KeyError:
+        raise HTTPException(404, "Task not found") from None
+    except FileNotFoundError:
+        raise HTTPException(404, "Task artifact not found") from None
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from None
+
+    interrupt_jobs()
+    input_info = ingest_audio(audio_path.read_bytes(), task.get("source_name") or f"{task_id}.wav")
+    payload = json.loads(events_path.read_text(encoding="utf-8"))
+    events = {
+        name: sorted(float(value) for value in payload.get("events", {}).get(name, []))
+        for name in CH_NAMES
+    }
+    thresholds = payload.get("thresholds") or task.get("options", {}).get("thresholds") or DEFAULT_THRESHOLDS
+    with STATE_LOCK:
+        PICK_REV[0] += 1
+        STATE["acts"] = {
+            "key": f"task-{task_id}",
+            "dir": str(TASKS.root / task_id),
+            "fps": int(task.get("options", {}).get("fps", 100)),
+            "tempo": float(payload.get("tempo") or task.get("tempo")),
+            "duration": float(payload.get("duration") or task.get("duration")),
+            "source": "task",
+        }
+        STATE["pick"] = {
+            "rev": PICK_REV[0],
+            "thresholds": thresholds,
+            "fps": STATE["acts"]["fps"],
+            "events": events,
+            "counts": {name: len(values) for name, values in events.items()},
+        }
+        STATE["tempo_override"] = None
+        STATE["workspace_task_id"] = task_id
+    return {"input": input_info, "task": TASKS.get(task_id)}
+
+
 @app.post("/api/tasks")
 def create_task(params: dict):
     """Queue a local-path pipeline. No file bytes are uploaded through HTTP."""
@@ -665,6 +712,7 @@ def create_task(params: dict):
             measures_per_system=params.get("measures_per_system", 3),
             pickup_mode=params.get("pickup_mode", "auto"),
             pickup_beats=params.get("pickup_beats", 0),
+            notation_offset_seconds=params.get("notation_offset_seconds"),
             fps=params.get("fps", 100),
             thresholds=params.get("thresholds"),
         )
@@ -897,6 +945,7 @@ def ingest_audio(data: bytes, filename: str) -> dict:
         STATE["acts"] = None
         STATE["pick"] = None
         STATE["tempo_override"] = None
+        STATE["workspace_task_id"] = None
     reset_jobs()
     return STATE["input"]
 
@@ -1121,6 +1170,7 @@ def get_state():
         "pick": {"rev": pick["rev"], "thresholds": pick["thresholds"],
                  "fps": pick["fps"], "counts": pick["counts"]} if pick else None,
         "tempo_override": STATE["tempo_override"],
+        "workspace_task_id": STATE.get("workspace_task_id"),
         "jobs": {"demucs": DEMUCS_JOB.as_dict(), "adtof": ADTOF_JOB.as_dict()},
         "defaults": {"thresholds": DEFAULT_THRESHOLDS},
     }
@@ -1329,6 +1379,12 @@ def events_update(params: dict):
         STATE["pick"]["rev"] = PICK_REV[0]
         STATE["pick"]["events"] = events
         STATE["pick"]["counts"] = {n: len(v) for n, v in events.items()}
+        workspace_task_id = STATE.get("workspace_task_id")
+    if workspace_task_id:
+        try:
+            TASKS.update_events(workspace_task_id, events)
+        except (KeyError, ValueError, OSError) as exc:
+            raise HTTPException(409, f"Workspace edit could not be saved to task: {exc}") from None
     return {"rev": PICK_REV[0], "counts": STATE["pick"]["counts"]}
 
 
@@ -1428,6 +1484,7 @@ def reset():
         STATE["acts"] = None
         STATE["pick"] = None
         STATE["tempo_override"] = None
+        STATE["workspace_task_id"] = None
     ACTS_RAM.clear()
     for d in (UPLOADS, STEMS, ACTS, OUT, DEMUCS_TMP):
         shutil.rmtree(d, ignore_errors=True)

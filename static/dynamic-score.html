@@ -59,8 +59,11 @@
   <label id="paper-size">A4 显示 <select><option value="fit">适应窗口</option><option value="small">小</option><option value="medium" selected>中</option><option value="large">大</option></select></label>
 </div>
 <div id="notation-controls">
+  <label>拍号 <input id="notation-beats" type="number" min="1" max="32" value="4"> / <select id="notation-beat-unit"><option>1</option><option>2</option><option selected>4</option><option>8</option><option>16</option><option>32</option></select></label>
+  <label>网格 <select id="notation-grid"><option>1/8</option><option selected>1/16</option><option>1/16T</option><option>1/32</option></select></label>
   <label>弱起 <select id="pickup-mode"><option value="auto">自动检测</option><option value="none">无弱起</option><option value="manual">手动</option></select></label>
   <label>拍数 <input id="pickup-beats" type="number" min="0" step="0.25" value="0"></label>
+  <label>忽略前导 <input id="notation-offset" type="number" min="0" step="0.01" value="0"> 秒</label>
   <label>每行 <input id="measures-per-system" type="number" min="1" max="6" value="3"> 小节</label>
   <button id="notation-save" type="button" disabled>保存谱面设置</button>
   <span id="notation-status"></span>
@@ -129,6 +132,10 @@ function cursorTimestamp() {
   } catch (_) { return Infinity; }
 }
 
+function scoreTimeFromAudio(seconds) {
+  return Math.max(0, Number(seconds || 0) - Number(meta?.notation_offset_seconds || 0));
+}
+
 function nextCursor() {
   try {
     osmd.cursor.next();
@@ -176,7 +183,7 @@ function placeCursor(seconds, forceReset = false) {
 function update() {
   seek.value = String(audio.currentTime || 0);
   $("clock").textContent = `${fmt(audio.currentTime)} / ${fmt(audio.duration || meta?.duration)}`;
-  placeCursor(audio.currentTime || 0);
+  placeCursor(scoreTimeFromAudio(audio.currentTime));
   if (!audio.paused && !audio.ended) raf = requestAnimationFrame(update);
 }
 
@@ -193,7 +200,7 @@ stop.addEventListener("click", () => {
   audio.pause(); audio.currentTime = 0; play.textContent = "Play";
   placeCursor(0, true); viewport.scrollTop = 0; update();
 });
-seek.addEventListener("input", () => { audio.currentTime = Number(seek.value); placeCursor(audio.currentTime, true); update(); });
+seek.addEventListener("input", () => { audio.currentTime = Number(seek.value); placeCursor(scoreTimeFromAudio(audio.currentTime), true); update(); });
 $("speed").querySelector("select").addEventListener("change", e => { audio.playbackRate = Number(e.target.value); });
 function selectedPaperSize() {
   const fromQuery = params.get("paper_size");
@@ -219,7 +226,7 @@ async function applyPaperSize() {
 
   await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
   osmd.render();
-  placeCursor(audio.currentTime || 0, true);
+  placeCursor(scoreTimeFromAudio(audio.currentTime), true);
 }
 $("paper-size").querySelector("select").addEventListener("change", applyPaperSize);
 function syncPickupInput() {
@@ -235,6 +242,10 @@ $("notation-save").addEventListener("click", async () => {
       body:JSON.stringify({
         pickup_mode:$("pickup-mode").value,
         pickup_beats:Number($("pickup-beats").value),
+        grid:$("notation-grid").value,
+        beats_per_measure:Number($("notation-beats").value),
+        beat_unit:Number($("notation-beat-unit").value),
+        notation_offset_seconds:Number($("notation-offset").value),
         measures_per_system:Number($("measures-per-system").value),
       }),
     });
@@ -255,7 +266,11 @@ audio.addEventListener("ended", () => {
     const task = await waitForTask();
     const options = task.options || {};
     $("pickup-mode").value = options.pickup_mode || "auto";
+    $("notation-grid").value = options.grid || "1/16";
+    $("notation-beats").value = String(options.beats_per_measure || 4);
+    $("notation-beat-unit").value = String(options.beat_unit || 4);
     $("pickup-beats").value = String(options.pickup_beats || 0);
+    $("notation-offset").value = String(options.notation_offset_seconds || 0);
     $("pickup-beats").max = String(Math.max(0, Number(options.beats_per_measure || 4) - 0.01));
     $("measures-per-system").value = String(options.measures_per_system || 3);
     syncPickupInput();
@@ -290,7 +305,7 @@ audio.addEventListener("ended", () => {
     message.classList.add("hidden");
     statusEl.textContent = `${meta.tempo.toFixed(1)} BPM · ${Object.values(meta.counts).reduce((a,b)=>a+b,0)} hits`;
     statusEl.classList.add("ready");
-    placeCursor(0, true); update();
+    placeCursor(scoreTimeFromAudio(0), true); update();
     window.__DRUMLAB_SCORE_READY__ = true;
   } catch (error) {
     statusEl.textContent = "Error";

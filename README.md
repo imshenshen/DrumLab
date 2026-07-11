@@ -206,12 +206,24 @@ The quantization grid snaps onset positions; it is not assigned as every note's 
 duration. DrumLab derives rhythmic duration from the next onset, consolidates silent spans,
 and applies beat-aware beaming so continuous eighth/sixteenth patterns stay visually grouped.
 
+`notation_offset_seconds` separates audio lead-in from musical notation. By default DrumLab
+sets it to the first quantized detected drum onset: audio playback still begins at 0, while
+that first onset is placed at score time 0 (the first beat unless a pickup is configured).
+The dynamic page can adjust and save this offset; cursor timing subtracts the same value from
+audio time so playback stays synchronized.
+
 Pickup handling uses `pickup_mode`: `none`, `manual`, or `auto` (default). Manual mode uses
 `pickup_beats`; auto mode scores kick, snare, and cymbal bar phases and stores both the
 detected pickup length and confidence. On a completed task, the dynamic-score page can edit
 the pickup and measures-per-system settings and save them back. REST clients can call
 `PATCH /api/tasks/{task_id}/notation`; MCP clients use `update_drum_score_notation`. This
 rebuilds only MusicXML and does not rerun Demucs or ADTOF.
+
+The main workbench can open a completed task by ID from its Export panel, or directly with
+`/?task_id=TASK_ID`. It loads the task audio and detected hits into the normal waveform/MIDI
+editor without rerunning either model. In task mode, MusicXML, MIDI, Sheet Music, meter,
+pickup, lead-in, grid, and bars-per-line all use the durable task. MIDI roll edits are written
+back to `events.json` and MIDI immediately; MusicXML is rebuilt lazily from those edits.
 
 The response contains a task ID and `queued` or `running` status. Poll
 `GET /api/tasks/{task_id}` until `completed`, then open `/tasks/{task_id}`. Artifacts are

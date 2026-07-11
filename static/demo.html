@@ -86,6 +86,7 @@
         <label>每行小节数<input id="measures-per-system" type="number" min="1" max="6" value="3"></label>
         <label>弱起处理<select id="pickup-mode"><option value="auto">自动检测</option><option value="none">无弱起</option><option value="manual">手动</option></select></label>
         <label>弱起拍数<input id="pickup-beats" type="number" min="0" max="31" step="0.25" value="0" disabled></label>
+        <label>谱面起点秒数<input id="notation-offset" type="number" min="0" step="0.01" placeholder="自动"></label>
         <label>ADTOF FPS<input id="fps" type="number" min="25" max="200" value="100"></label>
       </div>
       <details class="thresholds">
@@ -198,7 +199,8 @@ function taskRow(task) {
   const meter = `${task.options?.beats_per_measure || 4}/${task.options?.beat_unit || 4}`;
   const pickup = Number(task.options?.pickup_beats || 0);
   const pickupLabel = pickup > 0 ? `弱起 ${pickup} 拍` : "无弱起";
-  options.append(el("div", "", `${sourceLabel} · ${esc(task.options?.device)}`), el("div", "stage", `${meter} · ${pickupLabel} · 网格 ${esc(task.options?.grid)} · ${task.options?.measures_per_system || 3} 小节/行 · ${esc(task.options?.fps)} FPS · ${timeoutLabel}`));
+  const leadIn = Number(task.options?.notation_offset_seconds || 0);
+  options.append(el("div", "", `${sourceLabel} · ${esc(task.options?.device)}`), el("div", "stage", `${meter} · ${pickupLabel} · 忽略前导 ${leadIn.toFixed(2)}s · 网格 ${esc(task.options?.grid)} · ${task.options?.measures_per_system || 3} 小节/行 · ${esc(task.options?.fps)} FPS · ${timeoutLabel}`));
 
   const result = document.createElement("td");
   if (task.status === "completed") {
@@ -225,6 +227,7 @@ function taskRow(task) {
     if (completed) scoreLink.href = `${task.urls.page}?paper_size=${encodeURIComponent(viewPaper.value)}`;
   });
   actions.append(viewPaper, scoreLink);
+  actions.append(actionLink("主页面编辑", `/?task_id=${encodeURIComponent(task.id)}`, completed));
   actions.append(actionLink("MusicXML", task.urls.musicxml, completed));
   actions.append(actionLink("MIDI", `/api/tasks/${encodeURIComponent(task.id)}/midi`, completed));
   actionsCell.append(actions);
@@ -265,6 +268,7 @@ $("task-form").addEventListener("submit", async event => {
   const status = $("form-status"), submit = $("submit");
   submit.disabled = true; status.className=""; status.textContent="正在提交…";
   const thresholds = {};
+  const notationOffsetText = $("notation-offset").value.trim();
   document.querySelectorAll("[data-threshold]").forEach(input => { thresholds[input.dataset.threshold] = Number(input.value); });
   try {
     const task = await api("/api/tasks", {
@@ -276,6 +280,7 @@ $("task-form").addEventListener("submit", async event => {
         beats_per_measure:Number($("beats-per-measure").value), beat_unit:Number($("beat-unit").value),
         measures_per_system:Number($("measures-per-system").value),
         pickup_mode:$("pickup-mode").value, pickup_beats:Number($("pickup-beats").value),
+        notation_offset_seconds:notationOffsetText === "" ? null : Number(notationOffsetText),
         fps:Number($("fps").value), thresholds,
       }),
     });

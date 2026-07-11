@@ -37,6 +37,7 @@ def build_mcp_http_app(task_manager) -> tuple[Any, Any]:
         measures_per_system: int = 3,
         pickup_mode: str = "auto",
         pickup_beats: float = 0.0,
+        notation_offset_seconds: Optional[float] = None,
         fps: int = 100,
         thresholds: Optional[dict[str, float]] = None,
     ) -> dict[str, Any]:
@@ -53,6 +54,7 @@ def build_mcp_http_app(task_manager) -> tuple[Any, Any]:
             measures_per_system=measures_per_system,
             pickup_mode=pickup_mode,
             pickup_beats=pickup_beats,
+            notation_offset_seconds=notation_offset_seconds,
             fps=fps,
             thresholds=thresholds,
         )
@@ -74,6 +76,10 @@ def build_mcp_http_app(task_manager) -> tuple[Any, Any]:
         pickup_mode: str = "auto",
         pickup_beats: float = 0.0,
         measures_per_system: int = 3,
+        notation_offset_seconds: Optional[float] = None,
+        grid: str = "1/16",
+        beats_per_measure: int = 4,
+        beat_unit: int = 4,
     ) -> dict[str, Any]:
         """Re-detect or manually set pickup notation and rebuild MusicXML without GPU work."""
         task_manager._validate_port(service_port)
@@ -81,6 +87,10 @@ def build_mcp_http_app(task_manager) -> tuple[Any, Any]:
             "pickup_mode": pickup_mode,
             "pickup_beats": pickup_beats,
             "measures_per_system": measures_per_system,
+            "grid": grid,
+            "beats_per_measure": beats_per_measure,
+            "beat_unit": beat_unit,
+            **({"notation_offset_seconds": notation_offset_seconds} if notation_offset_seconds is not None else {}),
         })
 
     @server.tool()

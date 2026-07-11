@@ -251,6 +251,26 @@
 
   <div class="panel" id="panel-out">
     <h2>Export</h2>
+    <div class="task-open-row">
+      <input type="text" id="workspace-task-id" placeholder="Task ID">
+      <button class="ghost-btn" id="workspace-task-open" type="button">Open Task</button>
+      <button class="ghost-btn hidden" id="workspace-task-score" type="button">Dynamic score &#8599;</button>
+      <span class="hint" id="workspace-task-status"></span>
+    </div>
+    <div id="workspace-notation" class="workspace-notation hidden">
+      <label>Meter
+        <input type="number" id="workspace-beats" min="1" max="32" value="4">
+        / <select id="workspace-beat-unit"><option>1</option><option>2</option><option selected>4</option><option>8</option><option>16</option><option>32</option></select>
+      </label>
+      <label>Pickup
+        <select id="workspace-pickup-mode"><option value="auto">Auto</option><option value="none">None</option><option value="manual">Manual</option></select>
+      </label>
+      <label>Beats <input type="number" id="workspace-pickup-beats" min="0" step="0.25" value="0"></label>
+      <label>Lead-in <input type="number" id="workspace-offset" min="0" step="0.01" value="0"> s</label>
+      <label>Bars/line <input type="number" id="workspace-bars" min="1" max="6" value="3"></label>
+      <button class="ghost-btn" id="workspace-notation-save" type="button">Save score settings</button>
+      <span class="hint" id="workspace-notation-status"></span>
+    </div>
     <div class="row">
       <label title="Quantization grid for the quantized MIDI and the MusicXML score">Grid
         <select id="out-grid">

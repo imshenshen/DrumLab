@@ -44,6 +44,15 @@ select, input[type=number] {
   height: 25px; padding: 2px 6px; outline: none;
   font: inherit; font-size: 12px;
 }
+input[type=text] {
+  background: var(--panel2); color: var(--text); border: 1px solid var(--line);
+  border-radius: 4px; height: 25px; padding: 2px 6px; outline: none; font: inherit; font-size: 12px;
+}
+.task-open-row, .workspace-notation { display:flex; align-items:center; flex-wrap:wrap; gap:6px; margin-bottom:8px; }
+.task-open-row input { width:190px; }
+.workspace-notation { padding:7px; border:1px solid var(--line); border-radius:5px; background:var(--panel2); }
+.workspace-notation label { display:inline-flex; align-items:center; gap:4px; color:var(--dim); font-size:11px; }
+.workspace-notation input[type=number] { width:58px; }
 select:hover, input[type=number]:hover { border-color: #3d4350; }
 select:focus, input[type=number]:focus { border-color: var(--accent); }
 select { cursor: pointer; }
