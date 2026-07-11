@@ -1421,6 +1421,27 @@ class TaskManager:
         cursor_height = max(12, round(float(np.median([p.get("height", 20) for p in points]))))
         Image.new("RGBA", (cursor_width, cursor_height), (66, 214, 111, 92)).save(cursor_png)
 
+        # OSMD can vary a cursor box's y/height within one drum staff when a
+        # chord spans high and low instruments. Cluster all cursor centers into
+        # staff systems, then lock every point in a system to one stable y.
+        point_centers = sorted(
+            float(point["y"]) + float(point.get("height", cursor_height)) / 2
+            for point in points
+        )
+        system_clusters: list[list[float]] = []
+        cluster_gap = max(40.0, cursor_height * 2.0)
+        for center in point_centers:
+            if not system_clusters or center - system_clusters[-1][-1] > cluster_gap:
+                system_clusters.append([center])
+            else:
+                system_clusters[-1].append(center)
+        system_centers = [float(np.median(cluster)) for cluster in system_clusters]
+
+        def stable_cursor_y(point: dict[str, Any]) -> float:
+            center = float(point["y"]) + float(point.get("height", cursor_height)) / 2
+            system_center = min(system_centers, key=lambda value: abs(value - center))
+            return system_center - cursor_height / 2
+
         # A fit-to-width sheet can be a few CSS pixels wider than the even video
         # dimensions. Pad only when the sheet is narrower; otherwise crop the
         # wider sheet symmetrically. Use the same offset for cursor coordinates.
@@ -1436,11 +1457,7 @@ class TaskManager:
                 timestamp,
                 target_scroll,
                 sheet_x + float(point["x"]),
-                # OSMD's cursor box becomes taller for simultaneous high/low
-                # drum notes. Anchor our fixed-size cursor to its bottom so its
-                # top does not suddenly jump upward on those chords.
-                sheet_origin_y + float(point["y"]) + float(point.get("height", cursor_height))
-                - cursor_height,
+                sheet_origin_y + stable_cursor_y(point),
             ))
         samples.sort(key=lambda item: item[0])
         collapsed_samples: list[tuple[float, float, float, float]] = []
