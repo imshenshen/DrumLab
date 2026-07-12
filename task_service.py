@@ -177,10 +177,22 @@ class TaskManager:
             "pdf": f"/api/tasks/{task_id}/pdf",
             "musicxml": f"/api/tasks/{task_id}/musicxml",
             "events": f"/api/tasks/{task_id}/events",
+            "midi": f"/api/tasks/{task_id}/midi",
         }
-        pdf_path = self.root / task_id / "score.pdf"
-        if pdf_path.is_file():
-            data.setdefault("artifact_paths", {})["pdf"] = str(pdf_path)
+        artifact_files = {
+            "audio": "input.wav",
+            "pdf": "score.pdf",
+            "musicxml": "score.musicxml",
+            "events": "events.json",
+            "midi": "performance.mid",
+        }
+        artifact_paths = {
+            name: str(path)
+            for name, filename in artifact_files.items()
+            if (path := self.root / task_id / filename).is_file()
+        }
+        if artifact_paths:
+            data["artifact_paths"] = artifact_paths
         return data
 
     def _validate_audio_path(self, audio_path: str) -> Path:

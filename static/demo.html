@@ -245,7 +245,7 @@ function taskRow(task) {
   actions.append(actionLink("主页面编辑", `/?task_id=${encodeURIComponent(task.id)}`, completed));
   actions.append(actionLink("PDF", task.urls.pdf, completed));
   actions.append(actionLink("MusicXML", task.urls.musicxml, completed));
-  actions.append(actionLink("MIDI", `/api/tasks/${encodeURIComponent(task.id)}/midi`, completed));
+  actions.append(actionLink("MIDI", task.urls.midi, completed));
   actionsCell.append(actions);
   const controls = el("div", "record-controls");
   const ratio = document.createElement("select");

@@ -244,7 +244,8 @@ prevent agents from reading audio outside approved directories.
 
 Completed tasks include a Chromium-rendered `score.pdf`. Download it from
 `GET /api/tasks/{task_id}/pdf`; MCP task responses expose both `urls.pdf` and the server-local
-`artifact_paths.pdf`.
+`artifact_paths.pdf`. The same response includes URL and server-local path entries for MIDI,
+MusicXML, events JSON, and task audio when those artifacts exist.
 
 For manual operation, open `http://HOST:PORT/demo`. This page submits local-path tasks,
 polls the complete task queue, opens completed dynamic scores, exports MusicXML/MIDI, and
