@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Optional
 
 
@@ -102,7 +103,7 @@ def build_mcp_http_app(task_manager) -> tuple[Any, Any]:
         })
 
     @server.tool()
-    def create_dynamic_score_recording(
+    async def create_dynamic_score_recording(
         task_id: str,
         service_port: int,
         aspect_ratio: str = "16:9",
@@ -112,7 +113,11 @@ def build_mcp_http_app(task_manager) -> tuple[Any, Any]:
         fps: int = 30,
     ) -> dict[str, Any]:
         """Queue a silent GPU-encoded MP4 recording of a completed dynamic score."""
-        return task_manager.create_recording(
+        # Browser validation uses Playwright's synchronous API. MCP invokes async
+        # tools on its event-loop thread, where sync_playwright() is forbidden, so
+        # run the complete synchronous operation in a worker thread.
+        return await asyncio.to_thread(
+            task_manager.create_recording,
             task_id,
             service_port,
             aspect_ratio=aspect_ratio,
