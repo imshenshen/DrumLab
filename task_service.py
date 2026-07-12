@@ -658,6 +658,11 @@ class TaskManager:
         self._update(task_id, pdf_path=str(output))
         return output
 
+    def _invalidate_score_pdf(self, task_id: str, task: dict[str, Any]) -> None:
+        """Remove a rendered PDF after its MusicXML or events change."""
+        (self.root / task_id / "score.pdf").unlink(missing_ok=True)
+        task.pop("pdf_path", None)
+
     def _post_processing(self):
         spec = importlib.util.find_spec("adtof_pytorch")
         if not spec or not spec.origin:
@@ -1095,6 +1100,7 @@ class TaskManager:
             })
             (folder / "events.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
             task["score_version"] = SCORE_VERSION
+            self._invalidate_score_pdf(task_id, task)
             task["updated_at"] = _now()
             self._write(task)
 
@@ -1188,6 +1194,7 @@ class TaskManager:
             })
             (folder / "events.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
             task["score_version"] = SCORE_VERSION
+            self._invalidate_score_pdf(task_id, task)
             task["updated_at"] = _now()
             self._write(task)
             return self._public(task)
@@ -1212,6 +1219,7 @@ class TaskManager:
             self._build_midi(normalized, float(payload["tempo"]), folder / "performance.mid")
             task["hit_counts"] = payload["counts"]
             task["score_version"] = 0  # lazily rebuild MusicXML on the next task/score read
+            self._invalidate_score_pdf(task_id, task)
             task["updated_at"] = _now()
             self._write(task)
             return self._public(task)
