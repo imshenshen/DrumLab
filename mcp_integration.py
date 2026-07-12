@@ -28,7 +28,6 @@ def build_mcp_http_app(task_manager) -> tuple[Any, Any]:
     @server.tool()
     def create_drum_score_task(
         audio_path: str,
-        service_port: int,
         model: str = "htdemucs",
         device: str = "cuda",
         source_mode: str = "full_mix",
@@ -47,7 +46,6 @@ def build_mcp_http_app(task_manager) -> tuple[Any, Any]:
         """Queue an audio-to-dynamic-drum-score task using a server-local absolute path."""
         return task_manager.submit(
             audio_path,
-            service_port,
             model=model,
             device=device,
             source_mode=source_mode,
@@ -77,7 +75,6 @@ def build_mcp_http_app(task_manager) -> tuple[Any, Any]:
     @server.tool()
     def update_drum_score_notation(
         task_id: str,
-        service_port: int,
         pickup_mode: str = "auto",
         pickup_beats: float = 0.0,
         measures_per_system: int = 3,
@@ -89,7 +86,6 @@ def build_mcp_http_app(task_manager) -> tuple[Any, Any]:
         beat_unit: int = 4,
     ) -> dict[str, Any]:
         """Re-detect or manually set pickup notation and rebuild MusicXML without GPU work."""
-        task_manager._validate_port(service_port)
         return task_manager.update_notation(task_id, {
             "pickup_mode": pickup_mode,
             "pickup_beats": pickup_beats,
@@ -105,7 +101,6 @@ def build_mcp_http_app(task_manager) -> tuple[Any, Any]:
     @server.tool()
     async def create_dynamic_score_recording(
         task_id: str,
-        service_port: int,
         aspect_ratio: str = "16:9",
         width: int = 1920,
         height: Optional[int] = None,
@@ -119,7 +114,6 @@ def build_mcp_http_app(task_manager) -> tuple[Any, Any]:
         return await asyncio.to_thread(
             task_manager.create_recording,
             task_id,
-            service_port,
             aspect_ratio=aspect_ratio,
             width=width,
             height=height,

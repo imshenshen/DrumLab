@@ -78,7 +78,6 @@
         <label class="path">服务器本地音频绝对路径
           <input id="audio-path" required placeholder="/home/shenshen/music/song.flac" autocomplete="off">
         </label>
-        <label>服务端口<input id="service-port" type="number" min="1" max="65535" required></label>
         <label>音频类型<select id="source-mode"><option value="full_mix">完整混音（先分离）</option><option value="drum_only">纯鼓音频（跳过分离）</option></select></label>
         <label>Demucs 模型<select id="model"><option>htdemucs</option><option>htdemucs_ft</option><option>mdx_extra</option><option>mdx_extra_q</option></select></label>
         <label>设备<select id="device"><option value="cuda">CUDA</option><option value="cpu">CPU</option></select></label>
@@ -179,7 +178,7 @@ async function startRecording(taskId, ratio, width, paperSize, fps, button) {
   try {
     await api(`/api/tasks/${encodeURIComponent(taskId)}/recordings`, {
       method:"POST", headers:{"content-type":"application/json"},
-      body:JSON.stringify({service_port:Number($("service-port").value),aspect_ratio:ratio,width:Number(width),paper_size:paperSize,fps:Number(fps)}),
+      body:JSON.stringify({aspect_ratio:ratio,width:Number(width),paper_size:paperSize,fps:Number(fps)}),
     });
     await loadTasks();
   } catch (error) { alert(error.message); }
@@ -293,7 +292,7 @@ $("task-form").addEventListener("submit", async event => {
     const task = await api("/api/tasks", {
       method:"POST", headers:{"content-type":"application/json"},
       body:JSON.stringify({
-        audio_path:$("audio-path").value.trim(), service_port:Number($("service-port").value),
+        audio_path:$("audio-path").value.trim(),
         model:$("model").value, device:$("device").value, source_mode:$("source-mode").value,
         grid:$("grid").value,
         beats_per_measure:Number($("beats-per-measure").value), beat_unit:Number($("beat-unit").value),
@@ -321,7 +320,6 @@ $("source-mode").addEventListener("change", event => {
 $("pickup-mode").addEventListener("change", event => {
   $("pickup-beats").disabled = event.target.value !== "manual";
 });
-$("service-port").value = location.port || (location.protocol === "https:" ? 443 : 80);
 loadTasks();
 $("auto-refresh").checked = localStorage.getItem("drumlab-demo-auto-refresh") !== "0";
 syncAutoRefresh();

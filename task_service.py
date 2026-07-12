@@ -179,16 +179,6 @@ class TaskManager:
         }
         return data
 
-    def _validate_port(self, service_port: int) -> None:
-        if self.port is None:
-            raise ValueError("Service port is not initialized yet")
-        try:
-            supplied = int(service_port)
-        except (TypeError, ValueError):
-            raise ValueError("service_port must be an integer") from None
-        if supplied != self.port:
-            raise ValueError(f"Port mismatch: this DrumLab service is running on {self.port}")
-
     def _validate_audio_path(self, audio_path: str) -> Path:
         if not audio_path or not Path(audio_path).is_absolute():
             raise ValueError("audio_path must be an absolute local path on the DrumLab server")
@@ -205,7 +195,6 @@ class TaskManager:
     def submit(
         self,
         audio_path: str,
-        service_port: int,
         *,
         model: str = "htdemucs",
         device: str = "cuda",
@@ -222,7 +211,6 @@ class TaskManager:
         fps: int = 100,
         thresholds: Optional[dict[str, float]] = None,
     ) -> dict[str, Any]:
-        self._validate_port(service_port)
         source = self._validate_audio_path(audio_path)
         if grid not in GRID_Q:
             raise ValueError(f"grid must be one of {list(GRID_Q)}")
@@ -1198,7 +1186,6 @@ class TaskManager:
     def create_recording(
         self,
         task_id: str,
-        service_port: int,
         *,
         aspect_ratio: str = "16:9",
         width: int = 1920,
@@ -1206,7 +1193,6 @@ class TaskManager:
         paper_size: str = "fit",
         fps: int = 30,
     ) -> dict[str, Any]:
-        self._validate_port(service_port)
         task = self.get(task_id)
         if task["status"] != "completed":
             raise ValueError("The score task must be completed before recording")

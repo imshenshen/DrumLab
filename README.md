@@ -178,7 +178,7 @@ Create a task from an absolute path that exists **on the DrumLab server**:
 ```sh
 curl -X POST http://127.0.0.1:8765/api/tasks \
   -H 'content-type: application/json' \
-  -d '{"audio_path":"/music/song.flac","service_port":8765}'
+  -d '{"audio_path":"/music/song.flac"}'
 ```
 
 If the source is already a drum-only recording, skip Demucs and start directly at ADTOF:
@@ -186,7 +186,7 @@ If the source is already a drum-only recording, skip Demucs and start directly a
 ```sh
 curl -X POST http://127.0.0.1:8765/api/tasks \
   -H 'content-type: application/json' \
-  -d '{"audio_path":"/music/drums.wav","service_port":8765,"source_mode":"drum_only"}'
+  -d '{"audio_path":"/music/drums.wav","source_mode":"drum_only"}'
 ```
 
 `source_mode` accepts `full_mix` (default, Demucs then ADTOF) or `drum_only` (decode then
@@ -239,10 +239,8 @@ back to `events.json` and MIDI immediately; MusicXML is rebuilt lazily from thos
 
 The response contains a task ID and `queued` or `running` status. Poll
 `GET /api/tasks/{task_id}` until `completed`, then open `/tasks/{task_id}`. Artifacts are
-available from the URL map in the task response. The supplied `service_port` must match the
-actual DrumLab port; this prevents an agent from accidentally submitting work to the wrong
-local service. Use one or more `--task-root` flags to prevent agents from reading audio
-outside approved directories.
+available from the URL map in the task response. Use one or more `--task-root` flags to
+prevent agents from reading audio outside approved directories.
 
 For manual operation, open `http://HOST:PORT/demo`. This page submits local-path tasks,
 polls the complete task queue, opens completed dynamic scores, exports MusicXML/MIDI, and
@@ -266,7 +264,7 @@ Create a silent recording after the task completes:
 ```sh
 curl -X POST http://127.0.0.1:8765/api/tasks/TASK_ID/recordings \
   -H 'content-type: application/json' \
-  -d '{"service_port":8765,"aspect_ratio":"9:16","width":1080,"paper_size":"fit","fps":30}'
+  -d '{"aspect_ratio":"9:16","width":1080,"paper_size":"fit","fps":30}'
 ```
 
 Recording runs asynchronously and produces an H.264 MP4 without audio. Poll the returned recording

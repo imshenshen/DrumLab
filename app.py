@@ -702,7 +702,6 @@ def create_task(params: dict):
     try:
         task = TASKS.submit(
             params.get("audio_path", ""),
-            params.get("service_port"),
             model=params.get("model", "htdemucs"),
             device=params.get("device", "cuda"),
             source_mode=params.get("source_mode", "full_mix"),
@@ -800,7 +799,6 @@ def create_task_recording(task_id: str, params: dict):
     try:
         return TASKS.create_recording(
             task_id,
-            params.get("service_port"),
             aspect_ratio=params.get("aspect_ratio", "16:9"),
             width=params.get("width", 1920),
             height=params.get("height"),
