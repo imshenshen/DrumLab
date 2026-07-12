@@ -242,6 +242,10 @@ The response contains a task ID and `queued` or `running` status. Poll
 available from the URL map in the task response. Use one or more `--task-root` flags to
 prevent agents from reading audio outside approved directories.
 
+Completed tasks include a Chromium-rendered `score.pdf`. Download it from
+`GET /api/tasks/{task_id}/pdf`; MCP task responses expose both `urls.pdf` and the server-local
+`artifact_paths.pdf`.
+
 For manual operation, open `http://HOST:PORT/demo`. This page submits local-path tasks,
 polls the complete task queue, opens completed dynamic scores, exports MusicXML/MIDI, and
 starts or downloads silent GPU-encoded MP4 recordings in 16:9, 9:16, 4:3, or 1:1.

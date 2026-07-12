@@ -782,6 +782,13 @@ def task_musicxml(task_id: str):
                         filename=f"{task_id}.musicxml", headers={"Cache-Control": "no-store"})
 
 
+@app.get("/api/tasks/{task_id}/pdf")
+def task_pdf(task_id: str):
+    path = _task_artifact(task_id, "pdf")
+    return FileResponse(path, media_type="application/pdf",
+                        filename=f"{task_id}-drum-score.pdf", headers={"Cache-Control": "no-store"})
+
+
 @app.get("/api/tasks/{task_id}/events")
 def task_events(task_id: str):
     return FileResponse(_task_artifact(task_id, "events"), media_type="application/json",

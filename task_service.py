@@ -174,9 +174,13 @@ class TaskManager:
         data["urls"] = {
             "page": f"/tasks/{task_id}",
             "audio": f"/api/tasks/{task_id}/audio",
+            "pdf": f"/api/tasks/{task_id}/pdf",
             "musicxml": f"/api/tasks/{task_id}/musicxml",
             "events": f"/api/tasks/{task_id}/events",
         }
+        pdf_path = self.root / task_id / "score.pdf"
+        if pdf_path.is_file():
+            data.setdefault("artifact_paths", {})["pdf"] = str(pdf_path)
         return data
 
     def _validate_audio_path(self, audio_path: str) -> Path:
@@ -614,6 +618,45 @@ class TaskManager:
             hit_counts=payload["counts"],
             score_version=SCORE_VERSION,
         )
+        self._generate_score_pdf(task_id)
+
+    def _generate_score_pdf(self, task_id: str) -> Path:
+        """Render the completed OSMD score to a printable PDF in Chromium."""
+        from playwright.sync_api import sync_playwright
+
+        if self.port is None:
+            raise RuntimeError("Service port is not initialized")
+        self._validate_recording_browser()
+        output = self.root / task_id / "score.pdf"
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(**self._recording_launch_kwargs(playwright))
+            page = browser.new_page(viewport={"width": 1240, "height": 1754})
+            try:
+                page.goto(
+                    f"http://127.0.0.1:{self.port}/tasks/{task_id}?paper_size=medium",
+                    wait_until="networkidle",
+                )
+                page.wait_for_function("window.__DRUMLAB_SCORE_READY__ === true", timeout=120000)
+                page.add_style_tag(content="""
+                    html, body { width: auto !important; height: auto !important; overflow: visible !important; }
+                    body { display: block !important; background: white !important; }
+                    header, #controls, #notation-controls, audio { display: none !important; }
+                    #viewport { position: static !important; overflow: visible !important; background: white !important; }
+                    #sheet-wrap { width: 100% !important; margin: 0 !important; padding: 0 !important; box-shadow: none !important; }
+                """)
+                page.pdf(
+                    path=str(output),
+                    format="A4",
+                    print_background=True,
+                    prefer_css_page_size=True,
+                    margin={"top": "8mm", "right": "8mm", "bottom": "8mm", "left": "8mm"},
+                )
+            finally:
+                browser.close()
+        if not output.is_file() or output.stat().st_size == 0:
+            raise RuntimeError("Chromium did not produce score.pdf")
+        self._update(task_id, pdf_path=str(output))
+        return output
 
     def _post_processing(self):
         spec = importlib.util.find_spec("adtof_pytorch")
@@ -955,12 +998,15 @@ class TaskManager:
         task = self.get(task_id)
         if task["status"] != "completed":
             raise RuntimeError("Task is not completed")
-        allowed = {"audio": "input.wav", "musicxml": "score.musicxml", "events": "events.json", "midi": "performance.mid"}
+        allowed = {"audio": "input.wav", "pdf": "score.pdf", "musicxml": "score.musicxml", "events": "events.json", "midi": "performance.mid"}
         if name not in allowed:
             raise KeyError(name)
         if name == "musicxml" and int(task.get("score_version") or 0) < SCORE_VERSION:
             self._upgrade_musicxml(task_id)
         path = self.root / task_id / allowed[name]
+        if name == "pdf" and not path.exists():
+            # Backfill PDFs for tasks completed before PDF output was introduced.
+            return self._generate_score_pdf(task_id)
         if not path.exists():
             raise FileNotFoundError(path)
         return path

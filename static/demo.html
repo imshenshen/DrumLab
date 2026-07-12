@@ -243,6 +243,7 @@ function taskRow(task) {
   });
   actions.append(viewPaper, scoreLink);
   actions.append(actionLink("主页面编辑", `/?task_id=${encodeURIComponent(task.id)}`, completed));
+  actions.append(actionLink("PDF", task.urls.pdf, completed));
   actions.append(actionLink("MusicXML", task.urls.musicxml, completed));
   actions.append(actionLink("MIDI", `/api/tasks/${encodeURIComponent(task.id)}/midi`, completed));
   actionsCell.append(actions);
